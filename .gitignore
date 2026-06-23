@@ -31,5 +31,11 @@ build/
 
 # ---- Build / cache ----
 .cache/
+.npm-cache/
 *.log
 .DS_Store
+*.local
+*.tsbuildinfo
+
+# ---- Cloudflare ----
+.wrangler/

@@ -1,2 +1,78 @@
 # imageto24
-将图片转为高清2k、4k。保持图片原生质量。支持多种图片格式和尺寸。
+
+A free, open-source, browser-based image upscaler. Upscale images to 1080p, 2K, or 4K — faithfully or AI-enhanced — entirely in your browser. **No uploads, no server, nothing leaves your device.**
+
+> 🚧 Under active development. The project skeleton is in place; upscaling behavior lands in subsequent slices.
+
+## Why
+
+Existing upscalers tend to offer either AI enhancement *or* faithful resizing — rarely both — and usually require uploading images to a server. imageto24 does both in the browser, so privacy-sensitive images (medical, legal, personal) never leave the device.
+
+- **Faithful mode** — mathematically lossless Lanczos interpolation. PNG / lossless WebP, EXIF preserved.
+- **AI mode** — Real-ESRGAN enhancement (general for photos, anime for illustrations), chosen automatically.
+- **Privacy by architecture** — WebGPU + WebAssembly, zero network image transfer.
+- **Universal fallback** — gracefully degrades to faithful mode on unsupported devices.
+
+See [`docs/prd/0001-mvp-image-upscaler.md`](docs/prd/0001-mvp-image-upscaler.md) for the full product spec and [`CONTEXT.md`](CONTEXT.md) for domain terms.
+
+## Tech stack
+
+React 19 · Vite · TypeScript · Tailwind CSS · shadcn/ui · Vitest · Cloudflare Pages
+
+## Run locally
+
+Requires Node 22+.
+
+```bash
+npm install      # install dependencies
+npm run dev      # start the dev server with HMR (http://localhost:5173)
+```
+
+### Other scripts
+
+```bash
+npm run build      # typecheck + production build → dist/
+npm run preview    # preview the production build locally
+npm run typecheck  # tsc, no emit
+npm run test       # run the Vitest suite once
+npm run test:watch # Vitest in watch mode
+```
+
+## Deployment
+
+The site deploys to **Cloudflare Pages** automatically on every push to `main`, via the [deploy workflow](.github/workflows/deploy.yml). The static bundle in `dist/` is published; there is no backend (per [ADR-0001](docs/adr/0001-browser-only-architecture.md)).
+
+### First-time setup
+
+1. Create a Cloudflare Pages project named `imageto24`.
+2. In the GitHub repo, add repository secrets:
+   - `CLOUDFLARE_API_TOKEN` — a token with the "Edit Cloudflare Workers" template (covers Pages).
+   - `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account ID.
+
+After that, every push to `main` builds and deploys automatically.
+
+### Manual deploy
+
+```bash
+cp .env.example .env   # fill in CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+npm run build
+npm run cf:deploy      # wrangler pages deploy dist
+```
+
+## Project layout
+
+```
+src/
+  components/ui/   # shadcn/ui components
+  lib/             # shared utilities (cn, etc.)
+  test/            # Vitest setup + tests
+docs/
+  adr/             # architecture decision records
+  prd/             # product requirements docs
+```
+
+The processing pipeline (`decode` → `classify` → `computeUpscaleFactor` → `upscale` → `encode`) lands in later slices as injectable, environment-agnostic functions — the project's testing seam.
+
+## License
+
+MIT — see [LICENSE](LICENSE). The project's own source is MIT-licensed. Third-party AI model weights (Real-ESRGAN) carry their own licenses, respected and attributed separately.
