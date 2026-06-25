@@ -26,8 +26,11 @@ export type {
   TargetSpec,
   UpscaleFactor,
   UpscaleFactorResult,
+  UpscaleOptions,
   UpscalerDeps,
 } from "./types";
+
+export type { ExactTargetSize } from "./types";
 
 export { TIER_LONG_EDGE } from "./types";
 
@@ -40,6 +43,26 @@ export {
 } from "./computeUpscaleFactor";
 
 export { SUPPORTED_FACTORS } from "./computeUpscaleFactor";
+
+export {
+  type AxisTaps,
+  clampIndex,
+  dimsForLongEdge,
+  lanczosKernel,
+  lanczosResize,
+  lanczosUpscale,
+  LANCZOS_A,
+  precomputeAxis,
+} from "./lanczos";
+
+export {
+  applyExifOption,
+  type JpegSegment,
+  extractExifSegment,
+  injectExifIntoJpeg,
+  isExifApp1,
+  parseJpegSegments,
+} from "./exif";
 
 export {
   checkDeviceCapability,

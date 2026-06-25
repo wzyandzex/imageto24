@@ -17,10 +17,12 @@ import { classify } from "./steps";
 import { decode } from "./steps";
 import { encode } from "./steps";
 import { upscale } from "./steps";
-import { computeUpscaleFactor } from "./computeUpscaleFactor";
+import { computeUpscaleFactor, tierToLongEdge } from "./computeUpscaleFactor";
+import { dimsForLongEdge } from "./lanczos";
 import type {
   AiModel,
   ContentType,
+  ExactTargetSize,
   ImageFormat,
   PipelineDeps,
   ProcessImageOptions,
@@ -75,11 +77,29 @@ export async function processImage(
       model = await deps.modelLoader.loadModel(contentType);
     }
 
+    // When the tier/custom target's long edge differs from the native integer
+    // output, pass the exact target size so the upscaler applies a final Lanczos
+    // resize to land precisely on it (PRD §Resolution control, default path).
+    let exactTargetSize: ExactTargetSize | undefined;
+    if (factorResult.residualAdjustment !== 0) {
+      const targetLongEdge = options.target.tier !== undefined
+        ? tierToLongEdge(options.target.tier)
+        : options.target.customLongEdge;
+      if (targetLongEdge !== undefined) {
+        exactTargetSize = dimsForLongEdge(
+          imageData.width,
+          imageData.height,
+          targetLongEdge,
+        );
+      }
+    }
+
     // 5. Upscale.
     output = await upscale(deps.upscaler, imageData, {
       mode,
       factor: factorResult.factor,
       model,
+      exactTargetSize,
     });
   } else {
     // No valid upscale — factor is undefined; reflect that in the metadata.

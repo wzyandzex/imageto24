@@ -9,7 +9,6 @@
  * slices. Here they exist as injectable slots with trivial pass-throughs.
  */
 import {
-  type AiModel,
   type ContentType,
   type DecoderDeps,
   type DeviceCapability,
@@ -17,8 +16,7 @@ import {
   type EncodeOptions,
   type ImageData,
   type ImageFormat,
-  type ProcessingMode,
-  type UpscaleFactor,
+  type UpscaleOptions,
   type UpscalerDeps,
 } from "./types";
 
@@ -35,14 +33,14 @@ export async function decode(
 }
 
 /**
- * The upscale step. In faithful mode this will become Lanczos interpolation; in
- * AI mode, ONNX inference. Both arrive via {@link UpscalerDeps}; this slice ships
- * only the seam — the injected implementation is a placeholder for now.
+ * The upscale step. In faithful mode this is Lanczos interpolation; in AI mode it
+ * is ONNX inference. Both arrive via {@link UpscalerDeps}; this is a thin
+ * pass-through so the orchestrator stays decoupled from the dependency shape.
  */
 export async function upscale(
   deps: UpscalerDeps,
   imageData: ImageData,
-  options: { mode: ProcessingMode; factor: UpscaleFactor; model?: AiModel },
+  options: UpscaleOptions,
 ): Promise<ImageData> {
   return deps.upscale(imageData, options);
 }

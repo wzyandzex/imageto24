@@ -36,7 +36,7 @@ function scaleUp(src: ImageData, factor: number): ImageData {
 
 interface DepCallLog {
   decode: ImageFormat[];
-  upscale: { mode: string; factor?: number }[];
+  upscale: { mode: string; factor?: number; exactTargetSize?: { width: number; height: number } }[];
   encode: { format: ImageFormat; lossless: boolean; preserveExif: boolean }[];
   loadModel: ContentType[];
   capability: number;
@@ -81,9 +81,16 @@ function makeStubDeps(opts: {
     },
     upscaler: {
       upscale: vi.fn(
-        async (image: ImageData, o: { mode: string; factor?: number }) => {
+        async (
+          image: ImageData,
+          o: { mode: string; factor?: number; exactTargetSize?: { width: number; height: number } },
+        ) => {
           log.upscale.push(o);
-          // Stand-in upscale: scale by the resolved factor.
+          // Stand-in upscale: scale by the resolved factor, then honour an exact
+          // target size when the orchestrator requests a tier-precise landing.
+          if (o.exactTargetSize) {
+            return imageData(o.exactTargetSize.width, o.exactTargetSize.height);
+          }
           return scaleUp(image, o.factor ?? 1);
         },
       ),
@@ -132,12 +139,15 @@ describe("processImage — orchestration flow", () => {
     ]);
     // No AI model load in faithful mode.
     expect(log.loadModel).toHaveLength(0);
-    // Meta reflects the faithful upscale.
+    // Meta reflects the faithful upscale landing precisely on the 4K tier
+    // (native 4× of a 640-long-edge source is 2560, so a residual Lanczos
+    // resize brings the output to the exact 3840 target — PRD default path).
+    expect(log.upscale[0].exactTargetSize).toEqual({ width: 3840, height: 2160 });
     expect(result.meta).toEqual({
       mode: "faithful",
       factor: 4,
-      width: 640 * 4,
-      height: 360 * 4,
+      width: 3840,
+      height: 2160,
       noUpscale: false,
     });
   });

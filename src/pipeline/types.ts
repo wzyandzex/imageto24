@@ -97,17 +97,36 @@ export interface EncoderDeps {
   ): Promise<ArrayBuffer>;
 }
 
+/** Exact target dimensions, used to land an upscale precisely on a tier's long edge. */
+export interface ExactTargetSize {
+  readonly width: number;
+  readonly height: number;
+}
+
 /**
- * Runs the upscale. In faithful mode this will be Lanczos interpolation
+ * Runs the upscale. In faithful mode this is Lanczos interpolation
  * (deterministic, lossless); in AI mode it is ONNX model inference via WebGPU.
- * Both are environment-bound and arrive as injected implementations; this slice
- * ships a placeholder.
+ * Both are environment-bound and arrive as injected implementations.
+ *
+ * When {@link UpscaleOptions.exactTargetSize} is provided, the upscaler performs
+ * the integer-factor native upscale and then a final Lanczos resize to the exact
+ * target, honouring the tier's long edge precisely (PRD §Resolution control).
  */
 export interface UpscalerDeps {
-  upscale(
-    imageData: ImageData,
-    options: { mode: ProcessingMode; factor: UpscaleFactor; model?: AiModel },
-  ): Promise<ImageData>;
+  upscale(imageData: ImageData, options: UpscaleOptions): Promise<ImageData>;
+}
+
+/** Options for {@link UpscalerDeps.upscale}. */
+export interface UpscaleOptions {
+  readonly mode: ProcessingMode;
+  readonly factor: UpscaleFactor;
+  readonly model?: AiModel;
+  /**
+   * When set, the upscaler adjusts its native integer output to exactly these
+   * dimensions (the tier target). Absent for the explicit-factor / no-residual
+   * path, where the native output already matches the goal.
+   */
+  readonly exactTargetSize?: ExactTargetSize;
 }
 
 /** Loads (and caches) an AI model, lazily. Environment-bound (fetch / IndexedDB). */
