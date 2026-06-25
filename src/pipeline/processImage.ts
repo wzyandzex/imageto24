@@ -19,6 +19,7 @@ import { encode } from "./steps";
 import { upscale } from "./steps";
 import { computeUpscaleFactor, tierToLongEdge } from "./computeUpscaleFactor";
 import { dimsForLongEdge } from "./lanczos";
+import { estimateAiMemoryCost, resolveAiCapability } from "./capability";
 import type {
   AiModel,
   ContentType,
@@ -48,9 +49,12 @@ export async function processImage(
     deps.capability.checkDeviceCapability(),
   );
 
+  // WebGPU presence is known before we even decode; gate immediately. The
+  // memory-budget half waits until the source dimensions (and thus the AI cost)
+  // are known — see step 3 below.
   let mode = options.mode;
   if (mode === "ai" && !capability.webgpu) {
-    // Graceful degradation: AI unavailable → faithful mode.
+    // Graceful degradation: no WebGPU ⇒ AI unavailable.
     mode = "faithful";
   }
 
@@ -62,6 +66,24 @@ export async function processImage(
     { width: imageData.width, height: imageData.height },
     options.target,
   );
+
+  // Memory-budget gate (issue #5): now that the source size and resolved factor
+  // are known, estimate the AI cost and refuse AI mode if it would exceed the
+  // device's budget. Faithful mode is the offered alternative.
+  if (
+    mode === "ai" &&
+    !factorResult.noUpscale &&
+    factorResult.factor !== undefined
+  ) {
+    const aiCost = estimateAiMemoryCost(
+      imageData.width * imageData.height,
+      factorResult.factor,
+    );
+    const decision = resolveAiCapability(capability, aiCost);
+    if (!decision.canRunAi) {
+      mode = "faithful";
+    }
+  }
 
   // Boundary rule: target not larger than source — surface to the caller via meta
   // and skip the upscale, but still encode the (unchanged) image so the caller

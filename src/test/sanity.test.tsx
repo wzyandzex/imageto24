@@ -11,10 +11,12 @@ describe("sanity", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the placeholder home page with the app title", () => {
+  it("renders the placeholder home page with the app title", async () => {
     render(<App />);
+    // `findBy*` flushes the async capability probe (a mount-time state update)
+    // before the assertion resolves, so no update escapes the test.
     expect(
-      screen.getByRole("heading", { name: "imageto24", level: 1 }),
+      await screen.findByRole("heading", { name: "imageto24", level: 1 }),
     ).toBeInTheDocument();
   });
 

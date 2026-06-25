@@ -145,7 +145,13 @@ export interface CapabilityDetector {
 /** Output of the device capability check. */
 export interface DeviceCapability {
   readonly webgpu: boolean;
-  /** Estimated bytes available for AI work, or 0 when WebGPU is absent. */
+  /**
+   * Estimated bytes available for AI work, or 0 when no estimate is possible
+   * (`navigator.deviceMemory` is Chromium-only). With WebGPU present, 0 is
+   * treated as "unknown" by `resolveAiCapability` — AI is permitted and the
+   * runtime is left to enforce per-image limits. Without WebGPU, 0 simply
+   * reflects that no AI work can run at all.
+   */
   readonly memBudget: number;
 }
 

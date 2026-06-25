@@ -3,9 +3,9 @@
  * image run. The source file's bytes are threaded into the encoder so EXIF can
  * be re-attached after Canvas re-encodes (issue #4: "EXIF preserved by default").
  *
- * The model loader here is a stub — AI mode is not implemented in this slice; it
- * throws if reached, which the orchestrator only does in AI mode with WebGPU
- * available. The UI disables AI mode for this slice regardless.
+ * The model loader here is a stub — AI inference lands in the next slice (#6).
+ * It throws if reached; the capability check (#5) gates the AI option in the UI
+ * so this path is normally not taken. Faithful mode never touches it.
  */
 import { browserCapabilityDetector } from "./capability";
 import { browserDecoder } from "./canvasCodec";

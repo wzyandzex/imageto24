@@ -1,12 +1,18 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, ImageIcon, Loader2, Lock, Sparkles, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
+import { browserCapabilityDetector } from "@/pipeline/browser/capability";
 import {
   TIER_LONG_EDGE,
+  computeUpscaleFactor,
+  estimateAiMemoryCost,
+  resolveAiCapability,
+  type DeviceCapability,
   type ImageFormat,
   type ProcessImageResult,
+  type ProcessingMode,
   type ResolutionTier,
 } from "@/pipeline";
 
@@ -25,6 +31,7 @@ const TIERS: ResolutionTier[] = ["1080p", "2K", "4K"];
 
 function App() {
   const [source, setSource] = useState<SourceImage | null>(null);
+  const [mode, setMode] = useState<ProcessingMode>("faithful");
   const [tier, setTier] = useState<ResolutionTier>("4K");
   const [preserveExif, setPreserveExif] = useState(true);
   const [status, setStatus] = useState<Status>("idle");
@@ -34,6 +41,47 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
+
+  // Device capability check (issue #5, ADR-0002): probe WebGPU + memory budget
+  // once on mount. Faithful mode ignores the result and always runs; the AI
+  // option is gated by it. We never hard-error on an unsupported device.
+  const [capability, setCapability] = useState<DeviceCapability | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    browserCapabilityDetector
+      .checkDeviceCapability()
+      .then((cap) => {
+        if (!cancelled) setCapability(cap);
+      })
+      .catch(() => {
+        // A probe failure must never blank the page — fall back to "no AI".
+        if (!cancelled) setCapability({ webgpu: false, memBudget: 0 });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Derive the AI-capability decision from the probed capability and (when a
+  // source is loaded) the current source + tier. WebGPU failures can be explained
+  // before upload; memory failures are image/target-specific and appear once the
+  // requested work is known.
+  // `capability === null` (probe pending) is treated as "AI not yet known" and
+  // keeps the option disabled rather than optimistically enabling it.
+  const aiDecision = capability
+    ? resolveAiCapability(
+        capability,
+        aiCostForTarget(source, tier),
+      )
+    : null;
+  // When AI becomes unavailable (e.g. user picks a larger tier that blows the
+  // budget), snap an AI selection back to faithful so the run never targets an
+  // unsupported mode.
+  useEffect(() => {
+    if (aiDecision && !aiDecision.canRunAi && mode === "ai") {
+      setMode("faithful");
+    }
+  }, [aiDecision, mode]);
 
   // Load a chosen file: read bytes, probe dimensions via an Image, stash state.
   const loadFile = useCallback(async (file: File) => {
@@ -79,8 +127,10 @@ function App() {
         source: buffer,
         format: source.format,
         options: {
-          // Faithful mode → lossless PNG. EXIF preserved by default unless stripped.
-          mode: "faithful",
+          // The selected mode. When the device can't run AI the UI disables the
+          // option; the orchestrator also degrades AI→faithful defensively, so a
+          // stale mode can never crash the run (ADR-0002).
+          mode,
           target: { tier },
           outputFormat: "png",
           lossless: true,
@@ -97,7 +147,7 @@ function App() {
       setError(err instanceof Error ? err.message : String(err));
       setStatus("error");
     }
-  }, [source, tier, preserveExif, resultUrl]);
+  }, [source, mode, tier, preserveExif, resultUrl]);
 
   const downloadName = source
     ? source.file.name.replace(/\.[^.]+$/, "") + `_${tier}_upscaled.png`
@@ -172,22 +222,27 @@ function App() {
               </div>
             </div>
 
-            {/* Mode selector */}
+            {/* Mode selector — AI is gated by the device capability check (issue #5). */}
             <div className="flex flex-col gap-2">
               <p className="text-sm font-medium">Mode</p>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <ModeCard
-                  active
+                  testId="mode-faithful"
+                  active={mode === "faithful"}
                   icon={<ImageIcon className="size-5" />}
                   title="Faithful"
                   description="Mathematically lossless Lanczos interpolation. Zero detail invented."
+                  onSelect={() => setMode("faithful")}
                 />
                 <ModeCard
-                  disabled
+                  testId="mode-ai"
+                  active={mode === "ai"}
+                  disabled={!aiDecision?.canRunAi}
+                  reason={aiDecision?.reason ?? undefined}
                   icon={<Sparkles className="size-5" />}
                   title="AI Enhance"
-                  description="Reconstructs detail for a sharper result. Coming soon."
-                  badge="Coming soon"
+                  description="Reconstructs detail for a higher-resolution result. Non-lossless — detail is generated."
+                  onSelect={() => setMode("ai")}
                 />
               </div>
             </div>
@@ -285,6 +340,24 @@ function readDimensions(url: string): Promise<{ width: number; height: number }>
   });
 }
 
+/**
+ * Estimate the AI memory cost of upscaling the given source to the given tier,
+ * for gating the AI option. Returns 0 — "no AI work to charge for" — when there
+ * is no source yet or the target wouldn't upscale (target ≤ source). A 0 cost
+ * means the memory gate is a no-op and only WebGPU presence decides, which keeps
+ * the UI's gating consistent with the orchestrator (which skips the memory gate
+ * on the noUpscale path).
+ */
+function aiCostForTarget(source: SourceImage | null, tier: ResolutionTier): number {
+  if (!source) return 0;
+  const result = computeUpscaleFactor(
+    { width: source.width, height: source.height },
+    { tier },
+  );
+  if (result.noUpscale || result.factor === undefined) return 0;
+  return estimateAiMemoryCost(source.width * source.height, result.factor);
+}
+
 interface ModeCardProps {
   icon: React.ReactNode;
   title: string;
@@ -292,16 +365,25 @@ interface ModeCardProps {
   active?: boolean;
   disabled?: boolean;
   badge?: string;
+  /** Honest reason shown when the card is disabled (ADR-0002). */
+  reason?: string | null;
+  onSelect?: () => void;
+  testId?: string;
 }
 
-function ModeCard({ icon, title, description, active, disabled, badge }: ModeCardProps) {
+function ModeCard({ icon, title, description, active, disabled, badge, reason, onSelect, testId }: ModeCardProps) {
   return (
     <div
-      className={`relative flex flex-col gap-1 rounded-lg border p-4 text-left ${
+      data-testid={testId}
+      role="option"
+      aria-selected={active}
+      aria-disabled={disabled}
+      onClick={disabled ? undefined : onSelect}
+      className={`relative flex cursor-pointer flex-col gap-1 rounded-lg border p-4 text-left ${
         active
           ? "border-primary ring-1 ring-primary"
-          : "border-input opacity-60"
-      } ${disabled ? "cursor-not-allowed" : ""}`}
+          : "border-input hover:border-primary/50"
+      } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
     >
       <div className="flex items-center gap-2">
         {icon}
@@ -314,6 +396,9 @@ function ModeCard({ icon, title, description, active, disabled, badge }: ModeCar
         )}
       </div>
       <p className="text-sm text-muted-foreground">{description}</p>
+      {disabled && reason && (
+        <p className="text-xs text-muted-foreground">{reason}</p>
+      )}
     </div>
   );
 }
