@@ -48,6 +48,7 @@ interface DepCallLog {
  */
 function makeStubDeps(opts: {
   webgpu?: boolean;
+  memBudget?: number;
   srcWidth?: number;
   srcHeight?: number;
 }): { deps: PipelineDeps; log: DepCallLog } {
@@ -105,7 +106,11 @@ function makeStubDeps(opts: {
     capability: {
       checkDeviceCapability: vi.fn(async () => {
         log.capability += 1;
-        return { webgpu: opts.webgpu ?? true, memBudget: opts.webgpu ?? true ? 4_000_000_000 : 0 };
+        const webgpu = opts.webgpu ?? true;
+        return {
+          webgpu,
+          memBudget: opts.memBudget ?? (webgpu ? 4_000_000_000 : 0),
+        };
       }),
     },
   };
@@ -213,6 +218,28 @@ describe("processImage — graceful degradation (ADR-0002)", () => {
     );
 
     // AI was requested but the device can't run it ⇒ no model load, faithful path.
+    expect(log.loadModel).toHaveLength(0);
+    expect(log.upscale[0].mode).toBe("faithful");
+    expect(result.meta.mode).toBe("faithful");
+  });
+
+  it("falls back to faithful when AI cost exceeds the device memory budget", async () => {
+    // 640×360 source, 4K target ⇒ factor 4. A 1 KiB budget cannot fit it.
+    const { deps, log } = makeStubDeps({ webgpu: true, memBudget: 1024 });
+
+    const result = await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "ai",
+        target: { tier: "4K" },
+        outputFormat: "png",
+        lossless: true,
+        preserveExif: true,
+      },
+    );
+
+    // WebGPU was present, but the memory gate refused AI before model load.
     expect(log.loadModel).toHaveLength(0);
     expect(log.upscale[0].mode).toBe("faithful");
     expect(result.meta.mode).toBe("faithful");

@@ -30,6 +30,9 @@ export type {
   UpscalerDeps,
 } from "./types";
 
+export type { CapabilityDecision } from "./capability";
+export { estimateAiMemoryCost, resolveAiCapability } from "./capability";
+
 export type { ExactTargetSize } from "./types";
 
 export { TIER_LONG_EDGE } from "./types";
