@@ -19,6 +19,7 @@ import {
   type UpscaleOptions,
   type UpscalerDeps,
 } from "./types";
+import { classifyContent } from "./contentClassifier";
 
 /**
  * Decode an encoded file into pixel data. The actual codec (browser-native or a
@@ -70,16 +71,28 @@ export async function checkDeviceCapability(
 }
 
 /**
- * Lightweight content-type routing stub. Classification lands in a later slice;
- * for now this carries an assumed/passed-through content type so the orchestrator
- * signature stays stable. Exported for tests and for the orchestrator.
+ * Resolve the content type for AI model routing (issue #7, ADR-0003).
+ *
+ * A manual override (when the user picked "photo" or "anime" explicitly) always
+ * wins — it is the safety net for misclassification. Otherwise the lightweight
+ * colour-statistic classifier runs on the decoded pixels and returns in
+ * milliseconds. The orchestrator always passes the decoded `imageData`; the
+ * no-image branch exists only for direct unit use of this seam.
+ *
+ * @param override the user's manual choice, if any.
+ * @param imageData decoded pixels to classify when there is no override.
  */
 export function classify(
-  contentType: ContentType | undefined,
+  override: ContentType | undefined,
+  imageData?: ImageData,
 ): ContentType {
-  // No classifier yet: default to photo when the caller hasn't supplied one.
-  // (Real-ESRGAN general model is the safe default; see ADR-0003.)
-  return contentType ?? "photo";
+  if (override !== undefined) {
+    return override;
+  }
+  if (imageData !== undefined) {
+    return classifyContent(imageData);
+  }
+  return "photo";
 }
 
 /**

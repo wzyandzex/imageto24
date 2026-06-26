@@ -38,8 +38,11 @@ function requireUrl(envKey: string): string {
 }
 
 /**
- * Registry of available model assets. This slice ships only the general (photo)
- * model; the anime model + classifier are added in #7.
+ * Registry of available model assets (ADR-0003). The general (photo) model is
+ * the safe default; the anime model is registered here so AI mode can route to
+ * it when the classifier (issue #7) detects anime content or the user overrides.
+ * Each model is fetched lazily on first use and cached in IndexedDB, so a
+ * photo-only user never downloads the ~18MB anime model and vice versa.
  */
 export function getModelAsset(content: ContentType): ModelAssetDescriptor {
   switch (content) {
@@ -52,7 +55,18 @@ export function getModelAsset(content: ContentType): ModelAssetDescriptor {
         inputName: "input",
         outputName: "output",
       };
-    default:
-      throw new Error(`No AI model is registered yet for "${content}" content (see #7).`);
+    case "anime":
+      return {
+        id: "real-esrgan-anime-x4-v1",
+        content: "anime",
+        nativeFactor: 4,
+        url: requireUrl("VITE_MODEL_ANIME_URL"),
+        inputName: "input",
+        outputName: "output",
+      };
+    default: {
+      const _exhaustive: never = content;
+      throw new Error(`No AI model is registered for content "${_exhaustive}".`);
+    }
   }
 }

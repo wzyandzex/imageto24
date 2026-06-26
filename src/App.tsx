@@ -9,6 +9,7 @@ import {
   computeUpscaleFactor,
   estimateAiMemoryCost,
   resolveAiCapability,
+  type ContentType,
   type DeviceCapability,
   type ImageFormat,
   type ModelLoadProgress,
@@ -35,6 +36,7 @@ function App() {
   const [mode, setMode] = useState<ProcessingMode>("faithful");
   const [tier, setTier] = useState<ResolutionTier>("4K");
   const [preserveExif, setPreserveExif] = useState(true);
+  const [contentTypeOverride, setContentTypeOverride] = useState<"auto" | ContentType>("auto");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProcessImageResult | null>(null);
@@ -139,6 +141,13 @@ function App() {
             outputFormat: "png",
             lossless: true,
             preserveExif,
+            // Manual content-type override (issue #7): when the user picks photo or
+            // anime explicitly it wins over the classifier; "auto" leaves the call
+            // absent so the orchestrator classifies the decoded pixels.
+            contentType:
+              mode === "ai" && contentTypeOverride !== "auto"
+                ? contentTypeOverride
+                : undefined,
           },
         },
         {
@@ -159,7 +168,7 @@ function App() {
       setStatus("error");
       setModelProgress(null);
     }
-  }, [source, mode, tier, preserveExif, resultUrl]);
+  }, [source, mode, tier, preserveExif, contentTypeOverride, resultUrl]);
 
   const downloadName = source
     ? source.file.name.replace(/\.[^.]+$/, "") + `_${tier}_upscaled.png`
@@ -281,6 +290,38 @@ function App() {
                 ))}
               </div>
             </div>
+
+            {/* Content-type override — AI only (issue #7, ADR-0003). The classifier
+                picks the model automatically; this is the correction path when it's
+                wrong. Forcing anime downloads the ~18MB anime model on first use. */}
+            {mode === "ai" && (
+              <div className="flex flex-col gap-2" data-testid="content-type-control">
+                <p className="text-sm font-medium">Content type</p>
+                <div className="flex gap-2">
+                  {(["auto", "photo", "anime"] as const).map((ct) => (
+                    <button
+                      key={ct}
+                      data-testid={`content-type-${ct}`}
+                      onClick={() => setContentTypeOverride(ct)}
+                      className={`flex-1 rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
+                        contentTypeOverride === ct
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-input hover:bg-accent"
+                      }`}
+                    >
+                      {ct === "auto" ? "Auto-detect" : ct === "photo" ? "Photo" : "Anime"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {contentTypeOverride === "auto"
+                    ? "We detect this automatically. Override if the result looks wrong."
+                    : contentTypeOverride === "anime"
+                      ? "Uses the anime model — an extra ~18MB download on first use (cached afterwards)."
+                      : "Uses the general (photo) model."}
+                </p>
+              </div>
+            )}
 
             {/* EXIF option */}
             <label className="flex items-center gap-2 text-sm" data-testid="exif-control">

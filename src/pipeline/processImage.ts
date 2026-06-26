@@ -22,7 +22,6 @@ import { dimsForLongEdge } from "./lanczos";
 import { estimateAiMemoryCost, resolveAiCapability } from "./capability";
 import type {
   AiModel,
-  ContentType,
   ExactTargetSize,
   ImageFormat,
   ModelLoadProgressCb,
@@ -100,7 +99,7 @@ export async function processImage(
     // 4. (AI only) lazy model load, routed by content type.
     let model: AiModel | undefined;
     if (mode === "ai") {
-      const contentType: ContentType = classify(options.contentType);
+      const contentType = classify(options.contentType, imageData);
       model = await deps.modelLoader.loadModel(contentType, onModelProgress);
     }
 

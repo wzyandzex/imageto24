@@ -16,15 +16,40 @@ import type {
   PipelineDeps,
 } from "./types";
 
-/** Build a deterministic ImageData of the given size. */
+/**
+ * Build a deterministic, photo-style ImageData of the given size: a smooth
+ * gradient where neighbouring pixels rarely share an exact colour. This is what
+ * the content classifier (issue #7) needs to recognise as `photo`, so the
+ * default no-override AI path routes to the general model.
+ */
 function imageData(w: number, h: number): ImageData {
   const data = new Uint8ClampedArray(w * h * 4);
-  // A simple fill so the buffer is non-empty; content is irrelevant to these tests.
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] = 10;
-    data[i + 1] = 20;
-    data[i + 2] = 30;
-    data[i + 3] = 255;
+  let i = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      data[i++] = (x * 255) / Math.max(1, w - 1);
+      data[i++] = (y * 255) / Math.max(1, h - 1);
+      data[i++] = ((x + y) * 255) / Math.max(1, w + h - 2);
+      data[i++] = 255;
+    }
+  }
+  return { width: w, height: h, data };
+}
+
+/** An anime-style ImageData: large flat colour regions with hard edges. */
+function animeImageData(w: number, h: number): ImageData {
+  const data = new Uint8ClampedArray(w * h * 4);
+  const band = Math.floor(w / 3);
+  let i = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const [r, g, b] =
+        x < band ? [240, 248, 255] : x < band * 2 ? [255, 220, 177] : [120, 60, 40];
+      data[i++] = r;
+      data[i++] = g;
+      data[i++] = b;
+      data[i++] = 255;
+    }
   }
   return { width: w, height: h, data };
 }
@@ -51,6 +76,7 @@ function makeStubDeps(opts: {
   memBudget?: number;
   srcWidth?: number;
   srcHeight?: number;
+  srcKind?: "photo" | "anime";
 }): { deps: PipelineDeps; log: DepCallLog } {
   const log: DepCallLog = {
     decode: [],
@@ -59,7 +85,10 @@ function makeStubDeps(opts: {
     loadModel: [],
     capability: 0,
   };
-  const src = imageData(opts.srcWidth ?? 640, opts.srcHeight ?? 360);
+  const src =
+    opts.srcKind === "anime"
+      ? animeImageData(opts.srcWidth ?? 640, opts.srcHeight ?? 360)
+      : imageData(opts.srcWidth ?? 640, opts.srcHeight ?? 360);
 
   const deps: PipelineDeps = {
     decoder: {
@@ -180,8 +209,8 @@ describe("processImage — orchestration flow", () => {
     expect(result.meta.factor).toBe(4);
   });
 
-  it("defaults to the photo content type when none is provided (AI mode)", async () => {
-    const { deps, log } = makeStubDeps({ webgpu: true });
+  it("routes AI to the photo model by classifying a photo-style source when no override is given", async () => {
+    const { deps, log } = makeStubDeps({ webgpu: true, srcKind: "photo" });
 
     await processImage(
       deps,
@@ -195,7 +224,69 @@ describe("processImage — orchestration flow", () => {
       },
     );
 
-    // ADR-0003: general (photo) model is the safe default.
+    // No override ⇒ the classifier inspects the decoded pixels and returns photo.
+    expect(log.loadModel).toEqual(["photo"]);
+  });
+});
+
+describe("processImage — content-type routing (issue #7, ADR-0003)", () => {
+  it("routes AI to the anime model by classifying an anime-style source when no override is given", async () => {
+    const { deps, log } = makeStubDeps({ webgpu: true, srcKind: "anime" });
+
+    await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "ai",
+        target: { tier: "4K" },
+        outputFormat: "png",
+        lossless: true,
+        preserveExif: false,
+      },
+    );
+
+    // Flat-colour source ⇒ classifier returns anime ⇒ anime model loads (lazy).
+    expect(log.loadModel).toEqual(["anime"]);
+  });
+
+  it("a manual override beats the detected content type (photo source, anime override)", async () => {
+    // Source looks like a photo, but the user forces anime.
+    const { deps, log } = makeStubDeps({ webgpu: true, srcKind: "photo" });
+
+    await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "jpeg" },
+      {
+        mode: "ai",
+        target: { tier: "4K" },
+        outputFormat: "webp",
+        lossless: false,
+        preserveExif: false,
+        contentType: "anime",
+      },
+    );
+
+    // The override wins regardless of what the classifier would have returned.
+    expect(log.loadModel).toEqual(["anime"]);
+  });
+
+  it("a manual override beats the detected content type (anime source, photo override)", async () => {
+    // Source looks like anime, but the user forces photo.
+    const { deps, log } = makeStubDeps({ webgpu: true, srcKind: "anime" });
+
+    await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "ai",
+        target: { tier: "4K" },
+        outputFormat: "png",
+        lossless: true,
+        preserveExif: false,
+        contentType: "photo",
+      },
+    );
+
     expect(log.loadModel).toEqual(["photo"]);
   });
 });
