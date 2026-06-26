@@ -25,6 +25,7 @@ import type {
   ContentType,
   ExactTargetSize,
   ImageFormat,
+  ModelLoadProgressCb,
   PipelineDeps,
   ProcessImageOptions,
   ProcessImageResult,
@@ -37,11 +38,15 @@ import type {
  * @param deps   injected environment-bound dependencies (codec, runtime, models).
  * @param file   the encoded input.
  * @param options mode, target, output format, EXIF, optional content-type override.
+ * @param onModelProgress optional callback fired during a lazy AI model download
+ *   (issue #6) so the UI can show an honest first-use loading indicator. Ignored
+ *   in faithful mode and on the cached-model path.
  */
 export async function processImage(
   deps: PipelineDeps,
   file: { buffer: ArrayBuffer; format: ImageFormat },
   options: ProcessImageOptions,
+  onModelProgress?: ModelLoadProgressCb,
 ): Promise<ProcessImageResult> {
   // 1. Capability check — gates AI mode. When the device can't run AI, faithful
   //    mode is the available path (ADR-0002). We do not hard-error.
@@ -96,7 +101,7 @@ export async function processImage(
     let model: AiModel | undefined;
     if (mode === "ai") {
       const contentType: ContentType = classify(options.contentType);
-      model = await deps.modelLoader.loadModel(contentType);
+      model = await deps.modelLoader.loadModel(contentType, onModelProgress);
     }
 
     // When the tier/custom target's long edge differs from the native integer

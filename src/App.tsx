@@ -11,6 +11,7 @@ import {
   resolveAiCapability,
   type DeviceCapability,
   type ImageFormat,
+  type ModelLoadProgress,
   type ProcessImageResult,
   type ProcessingMode,
   type ResolutionTier,
@@ -38,6 +39,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProcessImageResult | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
+  const [modelProgress, setModelProgress] = useState<ModelLoadProgress | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
@@ -120,24 +122,33 @@ function App() {
     setStatus("processing");
     setError(null);
     setResult(null);
+    setModelProgress(null);
     try {
       // Read fresh bytes each run; the worker transfers (detaches) the buffer.
       const buffer = await source.file.arrayBuffer();
-      const res = await processImageInWorker({
-        source: buffer,
-        format: source.format,
-        options: {
-          // The selected mode. When the device can't run AI the UI disables the
-          // option; the orchestrator also degrades AI→faithful defensively, so a
-          // stale mode can never crash the run (ADR-0002).
-          mode,
-          target: { tier },
-          outputFormat: "png",
-          lossless: true,
-          preserveExif,
+      const res = await processImageInWorker(
+        {
+          source: buffer,
+          format: source.format,
+          options: {
+            // The selected mode. When the device can't run AI the UI disables the
+            // option; the orchestrator also degrades AI→faithful defensively, so a
+            // stale mode can never crash the run (ADR-0002).
+            mode,
+            target: { tier },
+            outputFormat: "png",
+            lossless: true,
+            preserveExif,
+          },
         },
-      });
+        {
+          // Forward the lazy model-download progress (AI mode only) so the UI can
+          // show an honest first-use indicator for the ~65MB download (issue #6).
+          onModelProgress: setModelProgress,
+        },
+      );
       setResult(res);
+      setModelProgress(null);
       if (resultUrl) URL.revokeObjectURL(resultUrl);
       const blob = new Blob([res.buffer], { type: "image/png" });
       const url = URL.createObjectURL(blob);
@@ -146,6 +157,7 @@ function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setStatus("error");
+      setModelProgress(null);
     }
   }, [source, mode, tier, preserveExif, resultUrl]);
 
@@ -242,6 +254,7 @@ function App() {
                   icon={<Sparkles className="size-5" />}
                   title="AI Enhance"
                   description="Reconstructs detail for a higher-resolution result. Non-lossless — detail is generated."
+                  footnote="Powered by Real-ESRGAN (BSD-3-Clause). First use downloads a ~65MB model once; it's cached for next time."
                   onSelect={() => setMode("ai")}
                 />
               </div>
@@ -300,9 +313,19 @@ function App() {
                 )}
               </Button>
               {status === "processing" && (
-                <p data-testid="progress" className="text-sm text-muted-foreground">
-                  Processing entirely in your browser — this may take a moment.
-                </p>
+                <>
+                  {modelProgress?.phase === "downloading" ? (
+                    <p data-testid="progress" className="text-sm text-muted-foreground">
+                      {modelProgress.total
+                        ? `Downloading the AI Enhance model for first use — ${formatBytes(modelProgress.received ?? 0)} of ${formatBytes(modelProgress.total)} (one-time, ~65MB; cached for next time).`
+                        : `Downloading the AI Enhance model for first use (one-time, ~65MB; cached for next time) — ${formatBytes(modelProgress.received ?? 0)} so far.`}
+                    </p>
+                  ) : (
+                    <p data-testid="progress" className="text-sm text-muted-foreground">
+                      Processing entirely in your browser — this may take a moment.
+                    </p>
+                  )}
+                </>
               )}
               {status === "error" && error && (
                 <p data-testid="error" className="text-sm text-destructive">{error}</p>
@@ -340,6 +363,19 @@ function readDimensions(url: string): Promise<{ width: number; height: number }>
   });
 }
 
+/** Compact "12.3 MB" style byte formatter for the model-download indicator. */
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
 /**
  * Estimate the AI memory cost of upscaling the given source to the given tier,
  * for gating the AI option. Returns 0 — "no AI work to charge for" — when there
@@ -367,11 +403,13 @@ interface ModeCardProps {
   badge?: string;
   /** Honest reason shown when the card is disabled (ADR-0002). */
   reason?: string | null;
+  /** Small secondary line shown under the description (e.g. attribution). */
+  footnote?: string;
   onSelect?: () => void;
   testId?: string;
 }
 
-function ModeCard({ icon, title, description, active, disabled, badge, reason, onSelect, testId }: ModeCardProps) {
+function ModeCard({ icon, title, description, active, disabled, badge, reason, footnote, onSelect, testId }: ModeCardProps) {
   return (
     <div
       data-testid={testId}
@@ -396,6 +434,7 @@ function ModeCard({ icon, title, description, active, disabled, badge, reason, o
         )}
       </div>
       <p className="text-sm text-muted-foreground">{description}</p>
+      {footnote && <p className="text-xs text-muted-foreground/80">{footnote}</p>}
       {disabled && reason && (
         <p className="text-xs text-muted-foreground">{reason}</p>
       )}

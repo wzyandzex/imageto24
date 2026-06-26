@@ -43,10 +43,43 @@ export type ProcessingMode = "faithful" | "ai";
 /** Content category that routes AI model selection (see CONTEXT.md "Content type"). */
 export type ContentType = "photo" | "anime";
 
+/**
+ * A live AI inference session — the environment-bound object that actually runs
+ * model inference (ONNX Runtime Web `InferenceSession` in the browser). Modelled
+ * as a minimal interface so the pure dispatch logic can be tested in Node with a
+ * stub session that never touches a real GPU. The session is created by the
+ * (environment-bound) model loader and carried through the pipeline on the
+ * {@link AiModel}; it is absent on models that have not yet been loaded.
+ */
+export interface AiInferenceSession {
+  /**
+   * Run inference. `feeds` is a map of input tensor name → typed numeric array,
+   * matching the model's input signature. Returns a map of output tensor name →
+   * typed numeric array. Both shapes/strides are negotiated out-of-band (the AI
+   * upscaler knows the Real-ESRGAN contract); this interface stays generic so it
+   * can stand in for any ONNX session.
+   */
+  run(feeds: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** Release the underlying session/resources. Called after each run. */
+  release(): Promise<void> | void;
+}
+
 /** An AI model the AI-mode upscaler can run. */
 export interface AiModel {
   readonly id: string;
   readonly content: ContentType;
+  /**
+   * The native integer multiple this model scales by (Real-ESRGAN always 4×).
+   * The orchestrator may request a smaller factor; the AI upscaler runs the
+   * model at its native factor and then Lanczos-resizes to the requested target.
+   */
+  readonly nativeFactor: UpscaleFactor;
+  /**
+   * The live inference session, set once the model has been loaded. Absent on a
+   * bare descriptor before load; the AI upscaler throws if a run is attempted
+   * without one (a loud failure beats silently fabricating output).
+   */
+  readonly session?: AiInferenceSession;
 }
 
 /**
@@ -129,9 +162,32 @@ export interface UpscaleOptions {
   readonly exactTargetSize?: ExactTargetSize;
 }
 
+/**
+ * Progress reporting for a lazy model load. Fires when a model download starts,
+ * repeatedly as bytes stream in, and once when the load is ready. The orchestrator
+ * does not interpret the values — it forwards them to its own caller (the UI)
+ * so the user understands why the first AI run waits on a ~65MB download
+ * (PRD user story #17, issue #6). Absent/no callback for the no-download
+ * (cached) path.
+ */
+export interface ModelLoadProgress {
+  /** "downloading" while fetching the weights, "ready" once the session is live. */
+  readonly phase: "downloading" | "ready";
+  /** Bytes received so far, when known. */
+  readonly received?: number;
+  /** Total expected bytes, when the server reported Content-Length. */
+  readonly total?: number;
+}
+
+/**
+ * Progress callback threaded through the lazy model load. Optional; pure
+ * orchestration tests pass nothing and the loader still completes.
+ */
+export type ModelLoadProgressCb = (p: ModelLoadProgress) => void;
+
 /** Loads (and caches) an AI model, lazily. Environment-bound (fetch / IndexedDB). */
 export interface ModelLoaderDeps {
-  loadModel(content: ContentType): Promise<AiModel>;
+  loadModel(content: ContentType, onProgress?: ModelLoadProgressCb): Promise<AiModel>;
 }
 
 /**

@@ -99,7 +99,7 @@ function makeStubDeps(opts: {
     modelLoader: {
       loadModel: vi.fn(async (content: ContentType) => {
         log.loadModel.push(content);
-        const model: AiModel = { id: `stub-${content}`, content };
+        const model: AiModel = { id: `stub-${content}`, content, nativeFactor: 4 };
         return model;
       }),
     },

@@ -3,20 +3,25 @@
  * image run. The source file's bytes are threaded into the encoder so EXIF can
  * be re-attached after Canvas re-encodes (issue #4: "EXIF preserved by default").
  *
- * The model loader here is a stub — AI inference lands in the next slice (#6).
- * It throws if reached; the capability check (#5) gates the AI option in the UI
- * so this path is normally not taken. Faithful mode never touches it.
+ * The model loader lazily downloads Real-ESRGAN from R2 on first AI use and
+ * caches it in IndexedDB (#6, ADR-0003). Faithful mode never touches it.
  */
 import { browserCapabilityDetector } from "./capability";
 import { browserDecoder } from "./canvasCodec";
 import { browserEncoderWithSource } from "./canvasCodec";
 import { faithfulUpscaler } from "./upscaler";
-import type { ContentType, ModelLoaderDeps, PipelineDeps } from "../types";
+import { loadRealEsrganModel } from "./modelLoader";
+import type { ModelLoaderDeps, PipelineDeps } from "../types";
 
-/** A model loader that refuses to load — AI mode is gated off in this slice. */
-const aiDisabledModelLoader: ModelLoaderDeps = {
-  async loadModel(_content: ContentType) {
-    throw new Error("AI mode is not available in this slice");
+/**
+ * Browser model loader: delegates to the lazy R2 + IndexedDB ORT loader. WebGPU
+ * is preferred (per ADR-0003); the device-capability gate from #5 has already
+ * confirmed at least one viable EP before this is reached, so we re-probe
+ * navigator.gpu here only to pick the bundle.
+ */
+const browserModelLoader: ModelLoaderDeps = {
+  async loadModel(content, onProgress) {
+    return loadRealEsrganModel(content, onProgress, true);
   },
 };
 
@@ -31,7 +36,7 @@ export function browserPipelineDeps(sourceBytes: ArrayBuffer | undefined): Pipel
     decoder: browserDecoder,
     encoder: browserEncoderWithSource(sourceBytes),
     upscaler: faithfulUpscaler,
-    modelLoader: aiDisabledModelLoader,
+    modelLoader: browserModelLoader,
     capability: browserCapabilityDetector,
   };
 }

@@ -8,6 +8,7 @@
  */
 export type {
   AiModel,
+  AiInferenceSession,
   ContentType,
   DecoderDeps,
   DecodedImage,
@@ -17,6 +18,8 @@ export type {
   ImageData,
   ImageFormat,
   ModelLoaderDeps,
+  ModelLoadProgress,
+  ModelLoadProgressCb,
   PipelineDeps,
   ProcessImageMeta,
   ProcessImageOptions,
@@ -66,6 +69,16 @@ export {
   isExifApp1,
   parseJpegSegments,
 } from "./exif";
+
+export {
+  type AiUpscaleOptions,
+  type NchwTensor,
+  aiUpscale,
+  imageDataToNchw,
+  nchwToImageData,
+  REAL_ESRGAN_INPUT,
+  REAL_ESRGAN_OUTPUT,
+} from "./aiUpscale";
 
 export {
   checkDeviceCapability,
