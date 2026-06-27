@@ -81,15 +81,6 @@ export {
   REAL_ESRGAN_OUTPUT,
 } from "./aiUpscale";
 
-export {
-  checkDeviceCapability,
-  classify,
-  decode,
-  defaultCapabilityDetector,
-  encode,
-  upscale,
-} from "./steps";
-
 export { processImage } from "./processImage";
 
 // Format matrix (issue #10): the pure policy above the browser codecs. The input

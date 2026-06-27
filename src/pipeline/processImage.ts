@@ -12,11 +12,7 @@
  *
  * This slice orchestrates the seam; the injected implementations are stubs.
  */
-import { checkDeviceCapability } from "./steps";
-import { classify } from "./steps";
-import { decode } from "./steps";
-import { encode } from "./steps";
-import { upscale } from "./steps";
+import { classifyContent } from "./contentClassifier";
 import { computeUpscaleFactor, tierToLongEdge } from "./computeUpscaleFactor";
 import { dimsForLongEdge } from "./lanczos";
 import { estimateAiMemoryCost, resolveAiCapability } from "./capability";
@@ -50,9 +46,7 @@ export async function processImage(
 ): Promise<ProcessImageResult> {
   // 1. Capability check — gates AI mode. When the device can't run AI, faithful
   //    mode is the available path (ADR-0002). We do not hard-error.
-  const capability = await checkDeviceCapability(() =>
-    deps.capability.checkDeviceCapability(),
-  );
+  const capability = await deps.capability.checkDeviceCapability();
 
   // WebGPU presence is known before we even decode; gate immediately. The
   // memory-budget half waits until the source dimensions (and thus the AI cost)
@@ -71,7 +65,7 @@ export async function processImage(
   const resolved = resolveOutput(mode, options.outputFormat, options.lossless);
 
   // 2. Decode.
-  const imageData = await decode(deps.decoder, file.buffer, file.format);
+  const imageData = await deps.decoder.decode(file.buffer, file.format);
 
   // 3. Resolve the upscale factor (or the noUpscale boundary).
   const factorResult = computeUpscaleFactor(
@@ -104,10 +98,13 @@ export async function processImage(
   let factorMeta: UpscaleFactor | undefined = factorResult.factor;
 
   if (!factorResult.noUpscale && factorResult.factor !== undefined) {
-    // 4. (AI only) lazy model load, routed by content type.
+    // 4. (AI only) lazy model load, routed by content type. A manual override
+    //    always wins (ADR-0003 safety net); otherwise the lightweight classifier
+    //    inspects the decoded pixels and returns in milliseconds.
     let model: AiModel | undefined;
     if (mode === "ai") {
-      const contentType = classify(options.contentType, imageData);
+      const contentType =
+        options.contentType ?? classifyContent(imageData);
       model = await deps.modelLoader.loadModel(contentType, onModelProgress);
     }
 
@@ -129,7 +126,7 @@ export async function processImage(
     }
 
     // 5. Upscale.
-    output = await upscale(deps.upscaler, imageData, {
+    output = await deps.upscaler.upscale(imageData, {
       mode,
       factor: factorResult.factor,
       model,
@@ -142,7 +139,7 @@ export async function processImage(
 
   // 6. Encode. The resolved format/lossless honour the mode's constraints —
   //    faithful mode never emits lossy output (issue #10, resolved above).
-  const buffer = await encode(deps.encoder, output, {
+  const buffer = await deps.encoder.encode(output, {
     format: resolved.format,
     lossless: resolved.lossless,
     preserveExif: options.preserveExif,
