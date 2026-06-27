@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Download, ImageIcon, Loader2, Lock, Sparkles, Upload } from "lucide-react";
+import { Download, Heart, ImageIcon, Loader2, Lock, ShieldCheck, Sparkles, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BatchPanel } from "@/components/BatchPanel";
+import { PrivacyDialog } from "@/components/PrivacyDialog";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
+import { SITE_LINKS } from "@/lib/siteLinks";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
 import { browserCapabilityDetector } from "@/pipeline/browser/capability";
 import {
@@ -77,6 +79,9 @@ function App() {
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelLoadProgress | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // Privacy & about dialog (issue #11). Opened from the header chip and the
+  // footer; the dialog is the verifiable-privacy surface.
+  const [privacyOpen, setPrivacyOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
 
@@ -264,7 +269,14 @@ function App() {
             no image bytes ever leave your device.
           </p>
           <p className="mx-auto inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Lock className="size-3" /> Privacy by architecture — there is no server.
+            <Lock className="size-3" /> Privacy by architecture — there is no server.{" "}
+            <button
+              data-testid="privacy-link-header"
+              onClick={() => setPrivacyOpen(true)}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              How to verify
+            </button>
           </p>
         </header>
 
@@ -433,8 +445,66 @@ function App() {
             lossless: effectiveOutput.lossless,
           }}
         />
+
+        {/* Privacy trust layer footer (issue #11): the privacy claim is
+            verifiable, so the affordances to read and confirm it are always one
+            click away. Donation is the only "support" surface — optional, never
+            gating (ADR-0005). */}
+        <SiteFooter onOpenPrivacy={() => setPrivacyOpen(true)} />
       </div>
+
+      <PrivacyDialog open={privacyOpen} onClose={() => setPrivacyOpen(false)} />
     </main>
+  );
+}
+
+/**
+ * The site footer (issue #11): privacy/about, donation, and license links.
+ *
+ * Everything the privacy dialog expands on is reachable from here too, so the
+ * trust surface is present on every screen regardless of what the user is doing.
+ */
+function SiteFooter({ onOpenPrivacy }: { onOpenPrivacy: () => void }) {
+  return (
+    <footer className="mt-4 flex flex-col items-center gap-3 border-t border-border pt-6 text-center">
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm">
+        <button
+          data-testid="privacy-link-footer"
+          onClick={onOpenPrivacy}
+          className="inline-flex items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          <ShieldCheck className="size-3.5" /> Privacy &amp; about
+        </button>
+        <a
+          data-testid="footer-donation-link"
+          href={SITE_LINKS.donation}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          <Heart className="size-3.5" /> Donate
+        </a>
+        <a
+          href={`${SITE_LINKS.repo}/blob/main/LICENSE`}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          MIT license
+        </a>
+        <a
+          href={`${SITE_LINKS.repo}/blob/main/THIRD_PARTY_LICENSES.md`}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          Third-party licenses
+        </a>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Free &amp; open source. No accounts, no uploads, no usage limits.
+      </p>
+    </footer>
   );
 }
 

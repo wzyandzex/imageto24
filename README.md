@@ -2,7 +2,7 @@
 
 A free, open-source, browser-based image upscaler. Upscale images to 1080p, 2K, or 4K — faithfully or AI-enhanced — entirely in your browser. **No uploads, no server, nothing leaves your device.**
 
-> 🚧 Under active development. The project skeleton is in place; upscaling behavior lands in subsequent slices.
+> Faithful mode is fully functional. AI mode runs via WebGPU and falls back to faithful mode on unsupported devices.
 
 ## Why
 
@@ -14,6 +14,14 @@ Existing upscalers tend to offer either AI enhancement *or* faithful resizing �
 - **Universal fallback** — gracefully degrades to faithful mode on unsupported devices.
 
 See [`docs/prd/0001-mvp-image-upscaler.md`](docs/prd/0001-mvp-image-upscaler.md) for the full product spec and [`CONTEXT.md`](CONTEXT.md) for domain terms.
+
+## Privacy
+
+All processing runs in your browser — there is no server and no upload. This is verifiable, not just claimed: open DevTools → Network while upscaling and confirm no image bytes are transmitted. The open-source license makes the claim auditable in code. See the in-app **Privacy & about** dialog for the full statement.
+
+## Support
+
+The tool is free with no paid tier or usage limits — the work runs on your own machine, so there's nothing to charge for. If it's useful, [donations](https://github.com/sponsors/wzyandzex) help cover hosting and future work.
 
 ## Tech stack
 
@@ -75,4 +83,4 @@ The processing pipeline (`decode` → `classify` → `computeUpscaleFactor` → 
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The project's own source is MIT-licensed. Third-party AI model weights (Real-ESRGAN) carry their own licenses, respected and attributed separately.
+MIT — see [LICENSE](LICENSE). The project's own source is MIT-licensed. Third-party AI model weights (Real-ESRGAN, BSD 3-Clause) carry their own licenses and are attributed separately in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) — the MIT license does **not** cover the model weights.
