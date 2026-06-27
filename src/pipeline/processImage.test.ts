@@ -369,3 +369,94 @@ describe("processImage — boundary rule (target below source)", () => {
     expect(result.meta.height).toBe(2160);
   });
 });
+
+describe("processImage — resolution control variants (issue #8)", () => {
+  it("honours an explicit factor with no residual adjustment", async () => {
+    // 640×360 source, explicit 3× target. The native output already equals the
+    // goal (src × factor), so no exactTargetSize is requested and the factor is
+    // threaded straight through — "custom dimensions honored exactly" at the
+    // seam, for the factor variant.
+    const { deps, log } = makeStubDeps({ webgpu: true });
+
+    const result = await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "faithful",
+        target: { factor: 3 },
+        outputFormat: "png",
+        lossless: true,
+        preserveExif: true,
+      },
+    );
+
+    expect(log.upscale).toHaveLength(1);
+    expect(log.upscale[0].mode).toBe("faithful");
+    expect(log.upscale[0].factor).toBe(3);
+    // No residual ⇒ no exact target — the native 3× output is the goal.
+    expect(log.upscale[0].exactTargetSize).toBeUndefined();
+    expect(result.meta).toEqual({
+      mode: "faithful",
+      factor: 3,
+      width: 1920,
+      height: 1080,
+      noUpscale: false,
+    });
+  });
+
+  it("honours a custom long edge exactly via a residual Lanczos resize", async () => {
+    // 640×360 source, custom long edge 3000 ⇒ raw 3000/640 ≈ 4.69 ⇒ nearest
+    // supported 4× ⇒ native long edge 2560 ⇒ residual +440 (target larger than
+    // native). The orchestrator must request an exactTargetSize landing on the
+    // custom edge, aspect-preserved (3000 × 1688). This proves the custom path
+    // resolves the factor AND lands exactly on the requested size.
+    const { deps, log } = makeStubDeps({ webgpu: true });
+
+    const result = await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "faithful",
+        target: { customLongEdge: 3000 },
+        outputFormat: "png",
+        lossless: true,
+        preserveExif: true,
+      },
+    );
+
+    expect(log.upscale).toHaveLength(1);
+    expect(log.upscale[0].factor).toBe(4);
+    // The residual triggered an exact-target request, landing precisely on the
+    // custom long edge with aspect ratio preserved.
+    expect(log.upscale[0].exactTargetSize).toEqual({
+      width: 3000,
+      height: Math.round((360 * 3000) / 640),
+    });
+    expect(result.meta.factor).toBe(4);
+    expect(result.meta.width).toBe(3000);
+    expect(result.meta.height).toBe(Math.round((360 * 3000) / 640));
+    expect(result.meta.noUpscale).toBe(false);
+  });
+
+  it("surfaces noUpscale for a custom long edge at or below the source", async () => {
+    // 640-long-edge source, custom 640 ⇒ not larger ⇒ no upscale, no factor.
+    // The boundary rule must hold for the custom variant too (AC #4).
+    const { deps, log } = makeStubDeps({ webgpu: true });
+
+    const result = await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "faithful",
+        target: { customLongEdge: 640 },
+        outputFormat: "png",
+        lossless: true,
+        preserveExif: true,
+      },
+    );
+
+    expect(log.upscale).toHaveLength(0);
+    expect(result.meta.noUpscale).toBe(true);
+    expect(result.meta.factor).toBeUndefined();
+  });
+});

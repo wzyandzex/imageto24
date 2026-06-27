@@ -34,12 +34,19 @@ import type {
   ImageFormat,
   ModelLoadProgress,
   ProcessingMode,
-  ResolutionTier,
+  TargetSpec,
 } from "@/pipeline";
 
 interface BatchOptions {
   mode: ProcessingMode;
-  tier: ResolutionTier;
+  /**
+   * The shared resolution goal (issue #8 widened this from a bare tier to the
+   * full tier/factor/custom-long-edge choice). Both the single run and the
+   * batch queue consume the same `TargetSpec`, so the two flows stay consistent.
+   */
+  target: TargetSpec;
+  /** Short label for the active goal, used in download filenames. */
+  targetLabel: string;
   contentTypeOverride: "auto" | ContentType;
   preserveExif: boolean;
 }
@@ -60,7 +67,7 @@ interface BatchRow {
 }
 
 interface BatchPanelProps {
-  /** Shared processing options (mode, tier, content-type override, EXIF). */
+  /** Shared processing options (mode, resolution goal, content-type override, EXIF). */
   options: BatchOptions;
 }
 
@@ -93,7 +100,7 @@ export function BatchPanel({ options }: BatchPanelProps) {
         rows.push({
           id: `${file.name}-${rows.length}`,
           name: file.name,
-          downloadName: `${base}_${options.tier}_upscaled.png`,
+          downloadName: `${base}_${options.targetLabel}_upscaled.png`,
           buffer,
           format: format ?? "png",
           formatError: format ? null : `Unsupported file type: ${file.type || file.name}`,
@@ -132,7 +139,7 @@ export function BatchPanel({ options }: BatchPanelProps) {
               format: item.format,
               options: {
                 mode: options.mode,
-                target: { tier: options.tier },
+                target: options.target,
                 outputFormat: "png",
                 lossless: true,
                 preserveExif: options.preserveExif,
@@ -203,10 +210,10 @@ export function BatchPanel({ options }: BatchPanelProps) {
       if (!url) return;
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${it.name.replace(/\.[^.]+$/, "")}_${options.tier}_upscaled.png`;
+      a.download = `${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.png`;
       setTimeout(() => a.click(), i * 250);
     });
-  }, [state, options.tier]);
+  }, [state, options.targetLabel]);
 
   const progress = state?.progress;
   const completed = progress?.completed ?? 0;
@@ -304,7 +311,7 @@ export function BatchPanel({ options }: BatchPanelProps) {
                   <a
                     data-testid={`batch-download-${it.id}`}
                     href={state.urls.get(it.id)}
-                    download={`${it.name.replace(/\.[^.]+$/, "")}_${options.tier}_upscaled.png`}
+                    download={`${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.png`}
                     className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent"
                     aria-label={`Download ${it.name}`}
                   >

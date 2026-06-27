@@ -18,9 +18,20 @@ import {
   type ProcessImageResult,
   type ProcessingMode,
   type ResolutionTier,
+  type TargetSpec,
+  type UpscaleFactor,
 } from "@/pipeline";
 
 type Status = "idle" | "processing" | "done" | "error";
+
+/**
+ * The three resolution-input modes (PRD §Resolution control). Each resolves to
+ * a `TargetSpec` variant; the orchestrator's single `computeUpscaleFactor` path
+ * handles all three. The UI keeps them visually distinct so the user never
+ * wonders which goal they're expressing (issue #8, acceptance: "UI clearly
+ * distinguishes the three input modes").
+ */
+type ResolutionInputMode = "tier" | "factor" | "custom";
 
 interface SourceImage {
   file: File;
@@ -32,11 +43,19 @@ interface SourceImage {
 }
 
 const TIERS: ResolutionTier[] = ["1080p", "2K", "4K"];
+const FACTORS: UpscaleFactor[] = [2, 3, 4];
 
 function App() {
   const [source, setSource] = useState<SourceImage | null>(null);
   const [mode, setMode] = useState<ProcessingMode>("faithful");
+  // Resolution control (issue #8): the three input modes and their values. All
+  // three resolve into a single `TargetSpec` (see {@link resolveTarget}) so the
+  // orchestrator's existing `computeUpscaleFactor` path — which already
+  // supports tier / factor / custom-long-edge — drives every run unchanged.
+  const [resMode, setResMode] = useState<ResolutionInputMode>("tier");
   const [tier, setTier] = useState<ResolutionTier>("4K");
+  const [explicitFactor, setExplicitFactor] = useState<UpscaleFactor>(4);
+  const [customLongEdgeText, setCustomLongEdgeText] = useState("");
   const [preserveExif, setPreserveExif] = useState(true);
   const [contentTypeOverride, setContentTypeOverride] = useState<"auto" | ContentType>("auto");
   const [status, setStatus] = useState<Status>("idle");
@@ -47,6 +66,24 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
+
+  // The single source of truth for the run's resolution goal, derived from the
+  // active input mode. `custom` with no/invalid entry → empty target (nothing
+  // resolvable → `computeUpscaleFactor` returns noUpscale), which the UI also
+  // surfaces as the boundary notice below.
+  const target = resolveTarget(resMode, tier, explicitFactor, customLongEdgeText);
+  // A short label for the active goal, used on the trigger, the download link,
+  // and the batch download filenames (e.g. "4K", "4x", "3000px").
+  const targetLabel = resolveTargetLabel(resMode, tier, explicitFactor, customLongEdgeText);
+
+  // Whether the single-run trigger would be a silent no-op: the chosen goal
+  // doesn't resolve to an upscale against the loaded source (boundary rule,
+  // issue #8 AC #4). When true we disable the trigger and explain inline, so a
+  // target below the source is never a silent no-op.
+  const triggerDisabled = !!source && computeUpscaleFactor(
+    { width: source.width, height: source.height },
+    target,
+  ).noUpscale;
 
   // Device capability check (issue #5, ADR-0002): probe WebGPU + memory budget
   // once on mount. Faithful mode ignores the result and always runs; the AI
@@ -69,15 +106,19 @@ function App() {
   }, []);
 
   // Derive the AI-capability decision from the probed capability and (when a
-  // source is loaded) the current source + tier. WebGPU failures can be explained
-  // before upload; memory failures are image/target-specific and appear once the
-  // requested work is known.
+  // source is loaded) the current source + resolution goal. WebGPU failures can
+  // be explained before upload; memory failures are image/target-specific and
+  // appear once the requested work is known.
   // `capability === null` (probe pending) is treated as "AI not yet known" and
   // keeps the option disabled rather than optimistically enabling it.
+  // Because the cost is computed from the full derived `target` (issue #8),
+  // switching to a larger explicit factor or custom size that blows the budget
+  // disables AI in place — exactly the boundary rule AC #5, reusing the #5
+  // machinery rather than a new warning component.
   const aiDecision = capability
     ? resolveAiCapability(
         capability,
-        aiCostForTarget(source, tier),
+        aiCostForTarget(source, target),
       )
     : null;
   // When AI becomes unavailable (e.g. user picks a larger tier that blows the
@@ -139,7 +180,10 @@ function App() {
             // option; the orchestrator also degrades AI→faithful defensively, so a
             // stale mode can never crash the run (ADR-0002).
             mode,
-            target: { tier },
+            // The derived resolution goal (tier / factor / custom long edge).
+            // `computeUpscaleFactor` inside the orchestrator handles all three —
+            // no orchestrator changes were needed for issue #8.
+            target,
             outputFormat: "png",
             lossless: true,
             preserveExif,
@@ -170,10 +214,10 @@ function App() {
       setStatus("error");
       setModelProgress(null);
     }
-  }, [source, mode, tier, preserveExif, contentTypeOverride, resultUrl]);
+  }, [source, mode, target, preserveExif, contentTypeOverride, resultUrl]);
 
   const downloadName = source
-    ? source.file.name.replace(/\.[^.]+$/, "") + `_${tier}_upscaled.png`
+    ? source.file.name.replace(/\.[^.]+$/, "") + `_${targetLabel}_upscaled.png`
     : "upscaled.png";
 
   return (
@@ -217,15 +261,23 @@ function App() {
           </label>
         )}
 
-        {/* Shared settings: mode, target tier, content type, EXIF. These drive
-            both the single-image run and the batch queue, so they render
+        {/* Shared settings: mode, resolution control, content type, EXIF. These
+            drive both the single-image run and the batch queue, so they render
             whether or not an image is loaded. A user configures once and runs
             either flow. */}
         <SettingsControls
           mode={mode}
           setMode={setMode}
+          resMode={resMode}
+          setResMode={setResMode}
           tier={tier}
           setTier={setTier}
+          explicitFactor={explicitFactor}
+          setExplicitFactor={setExplicitFactor}
+          customLongEdgeText={customLongEdgeText}
+          setCustomLongEdgeText={setCustomLongEdgeText}
+          target={target}
+          source={source}
           contentTypeOverride={contentTypeOverride}
           setContentTypeOverride={setContentTypeOverride}
           preserveExif={preserveExif}
@@ -261,20 +313,34 @@ function App() {
               </div>
             </div>
 
+            {/* Boundary rule preview (issue #8, AC #4): when the chosen goal does
+                not exceed the source, the orchestrator will skip the upscale and
+                surface `noUpscale`. We tell the user *before* they run so it's
+                never a silent no-op — and disable the trigger, since clicking it
+                would only re-encode the unchanged image. */}
+            {source && (
+              <BoundaryNotice
+                source={source}
+                target={target}
+              />
+            )}
+
             {/* Trigger + progress */}
             <div className="flex flex-col gap-3">
               <Button
                 size="lg"
                 data-testid="upscale-button"
-                disabled={status === "processing"}
+                disabled={status === "processing" || triggerDisabled}
                 onClick={runUpscale}
               >
                 {status === "processing" ? (
                   <>
                     <Loader2 className="animate-spin" /> Upscaling…
                   </>
+                ) : triggerDisabled ? (
+                  <>Target not larger than source</>
                 ) : (
-                  <>Upscale to {tier}</>
+                  <>Upscale to {targetLabel}</>
                 )}
               </Button>
               {status === "processing" && (
@@ -307,7 +373,7 @@ function App() {
             {status === "done" && resultUrl && (
               <Button asChild size="lg" variant="secondary">
                 <a data-testid="download" href={resultUrl} download={downloadName}>
-                  <Download /> Download {tier} PNG
+                  <Download /> Download {targetLabel} PNG
                 </a>
               </Button>
             )}
@@ -315,12 +381,15 @@ function App() {
         )}
 
         {/* Batch queue (issue #9). Available even without a single image loaded
-            — it has its own multi-file picker. Shares the mode/tier/content-type/
-            EXIF controls above so a user configures once and runs either flow. */}
+            — it has its own multi-file picker. Shares the mode / resolution goal
+            / content-type / EXIF controls above so a user configures once and
+            runs either flow. Issue #8 widens the shared `target` from a tier to
+            the full tier/factor/custom choice. */}
         <BatchPanel
           options={{
             mode,
-            tier,
+            target,
+            targetLabel,
             contentTypeOverride,
             preserveExif,
           }}
@@ -354,28 +423,138 @@ function formatBytes(n: number): string {
 }
 
 /**
- * Estimate the AI memory cost of upscaling the given source to the given tier,
+ * Resolve the active resolution-input mode to the `TargetSpec` the orchestrator
+ * consumes. All three variants are already handled by `computeUpscaleFactor` —
+ * this just maps the UI's mode to the matching field (issue #8).
+ *
+ * `custom` with a non-positive/non-integer entry yields an empty target: nothing
+ * resolvable, so `computeUpscaleFactor` returns `noUpscale` and the UI surfaces
+ * the boundary notice. A valid long edge is honoured exactly by the orchestrator
+ * (the residual Lanczos lands it on the precise target).
+ */
+function resolveTarget(
+  resMode: ResolutionInputMode,
+  tier: ResolutionTier,
+  explicitFactor: UpscaleFactor,
+  customLongEdgeText: string,
+): TargetSpec {
+  switch (resMode) {
+    case "tier":
+      return { tier };
+    case "factor":
+      return { factor: explicitFactor };
+    case "custom": {
+      const parsed = parseCustomLongEdge(customLongEdgeText);
+      return parsed !== undefined ? { customLongEdge: parsed } : {};
+    }
+  }
+}
+
+/**
+ * Parse the custom long-edge text input. Accepts only a positive integer (the
+ * target's long edge in pixels); returns `undefined` for blank/invalid input so
+ * the caller maps it to an empty, unresolvable target.
+ */
+function parseCustomLongEdge(text: string): number | undefined {
+  const trimmed = text.trim();
+  if (trimmed === "") return undefined;
+  const n = Number(trimmed);
+  if (!Number.isInteger(n) || n <= 0) return undefined;
+  return n;
+}
+
+/**
+ * A short label for the active resolution goal — shown on the trigger, the
+ * download link, and the batch download filenames. Keeps the three modes
+ * legible in the UI (e.g. "4K", "4x", "3000px").
+ */
+function resolveTargetLabel(
+  resMode: ResolutionInputMode,
+  tier: ResolutionTier,
+  explicitFactor: UpscaleFactor,
+  customLongEdgeText: string,
+): string {
+  switch (resMode) {
+    case "tier":
+      return tier;
+    case "factor":
+      return `${explicitFactor}x`;
+    case "custom": {
+      const parsed = parseCustomLongEdge(customLongEdgeText);
+      return parsed !== undefined ? `${parsed}px` : "—";
+    }
+  }
+}
+
+/**
+ * Estimate the AI memory cost of upscaling the given source to the given goal,
  * for gating the AI option. Returns 0 — "no AI work to charge for" — when there
  * is no source yet or the target wouldn't upscale (target ≤ source). A 0 cost
  * means the memory gate is a no-op and only WebGPU presence decides, which keeps
  * the UI's gating consistent with the orchestrator (which skips the memory gate
  * on the noUpscale path).
+ *
+ * Takes the full derived `target` (issue #8), so a large explicit factor or a
+ * big custom size that blows the budget disables AI in place — the AC #5 memory
+ * boundary, reusing the #5 reason machinery.
  */
-function aiCostForTarget(source: SourceImage | null, tier: ResolutionTier): number {
+function aiCostForTarget(source: SourceImage | null, target: TargetSpec): number {
   if (!source) return 0;
   const result = computeUpscaleFactor(
     { width: source.width, height: source.height },
-    { tier },
+    target,
   );
   if (result.noUpscale || result.factor === undefined) return 0;
   return estimateAiMemoryCost(source.width * source.height, result.factor);
 }
 
+/**
+ * The boundary notice: when the chosen goal does not exceed the source, the run
+ * would be a no-op upscale. Per PRD user story #21 we tell the user rather than
+ * silently doing nothing. Returns null when the goal is a real upscale (or when
+ * the goal isn't yet resolvable, e.g. a blank custom field — the trigger is
+ * disabled in that case too).
+ */
+function BoundaryNotice({
+  source,
+  target,
+}: {
+  source: SourceImage;
+  target: TargetSpec;
+}) {
+  const result = computeUpscaleFactor(
+    { width: source.width, height: source.height },
+    target,
+  );
+  if (!result.noUpscale) return null;
+  return (
+    <p data-testid="boundary-noop" className="text-sm text-muted-foreground">
+      Your target isn't larger than the original ({source.width} ×{" "}
+      {source.height}px), so no upscale is needed. Pick a larger resolution tier,
+      a larger upscale factor, or a larger custom long edge to upscale.
+    </p>
+  );
+}
+
 interface SettingsControlsProps {
   mode: ProcessingMode;
   setMode: (m: ProcessingMode) => void;
+  /** Active resolution-input mode (issue #8). */
+  resMode: ResolutionInputMode;
+  setResMode: (m: ResolutionInputMode) => void;
+  /** Tier-mode value. */
   tier: ResolutionTier;
   setTier: (t: ResolutionTier) => void;
+  /** Explicit-factor-mode value. */
+  explicitFactor: UpscaleFactor;
+  setExplicitFactor: (f: UpscaleFactor) => void;
+  /** Custom-long-edge-mode value (raw text input). */
+  customLongEdgeText: string;
+  setCustomLongEdgeText: (s: string) => void;
+  /** The derived goal — passed down so the live preview reflects it. */
+  target: TargetSpec;
+  /** The loaded source, for the boundary-rule preview (null if none). */
+  source: SourceImage | null;
   contentTypeOverride: "auto" | ContentType;
   setContentTypeOverride: (ct: "auto" | ContentType) => void;
   preserveExif: boolean;
@@ -385,16 +564,30 @@ interface SettingsControlsProps {
 }
 
 /**
- * The shared settings block: mode, target tier, content-type override, EXIF.
- * Rendered regardless of whether an image is loaded, because the batch flow
- * (issue #9) is independently configurable and needs the tier/mode controls
- * visible without first uploading a single image.
+ * The shared settings block: mode, resolution control, content-type override,
+ * EXIF. Rendered regardless of whether an image is loaded, because the batch
+ * flow (issue #9) is independently configurable and needs the controls visible
+ * without first uploading a single image.
+ *
+ * The resolution control (issue #8) offers three clearly-distinguished input
+ * modes — a named tier, an explicit upscale factor, or a custom long-edge pixel
+ * size — all of which collapse into the same `TargetSpec` the orchestrator
+ * already understood. Switching modes never loses the other modes' values, so a
+ * user can experiment and return.
  */
 function SettingsControls({
   mode,
   setMode,
+  resMode,
+  setResMode,
   tier,
   setTier,
+  explicitFactor,
+  setExplicitFactor,
+  customLongEdgeText,
+  setCustomLongEdgeText,
+  target,
+  source,
   contentTypeOverride,
   setContentTypeOverride,
   preserveExif,
@@ -403,7 +596,10 @@ function SettingsControls({
 }: SettingsControlsProps) {
   return (
     <section className="flex flex-col gap-8">
-      {/* Mode selector — AI is gated by the device capability check (issue #5). */}
+      {/* Mode selector — AI is gated by the device capability check (issue #5).
+          The gate now keys off the full derived `target`, so a factor/custom
+          goal that blows the memory budget disables AI in place with the same
+          honest reason + faithful fallback (issue #8, AC #5). */}
       <div className="flex flex-col gap-2">
         <p className="text-sm font-medium">Mode</p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -429,26 +625,105 @@ function SettingsControls({
         </div>
       </div>
 
-      {/* Target resolution tier */}
-      <div className="flex flex-col gap-2">
-        <p className="text-sm font-medium">Target resolution</p>
-        <div className="flex gap-2">
-          {TIERS.map((t) => (
-            <button
-              key={t}
-              data-testid={`tier-${t}`}
-              onClick={() => setTier(t)}
-              className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
-                tier === t
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-input hover:bg-accent"
-              }`}
-            >
-              {t}
-              <span className="block text-xs opacity-70">{TIER_LONG_EDGE[t]}px</span>
-            </button>
-          ))}
+      {/* Resolution control (issue #8): three input modes. A tab strip selects
+          the mode; the panel below renders the matching control. The modes are
+          visually distinct so the user always knows which goal they're setting. */}
+      <div className="flex flex-col gap-3" data-testid="resolution-control">
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium">Target resolution</p>
+          <div className="flex gap-1 rounded-lg border border-border p-1">
+            {RES_MODES.map((m) => (
+              <button
+                key={m}
+                data-testid={`res-mode-${m}`}
+                onClick={() => setResMode(m)}
+                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                  resMode === m
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-accent"
+                }`}
+              >
+                {RES_MODE_LABEL[m]}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {resMode === "tier" && (
+          <div className="flex gap-2" data-testid="resolution-tier-panel">
+            {TIERS.map((t) => (
+              <button
+                key={t}
+                data-testid={`tier-${t}`}
+                onClick={() => setTier(t)}
+                className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
+                  tier === t
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input hover:bg-accent"
+                }`}
+              >
+                {t}
+                <span className="block text-xs opacity-70">{TIER_LONG_EDGE[t]}px</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {resMode === "factor" && (
+          <div className="flex flex-col gap-2" data-testid="resolution-factor-panel">
+            <div className="flex gap-2">
+              {FACTORS.map((f) => (
+                <button
+                  key={f}
+                  data-testid={`factor-${f}`}
+                  onClick={() => setExplicitFactor(f)}
+                  className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
+                    explicitFactor === f
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-input hover:bg-accent"
+                  }`}
+                >
+                  {f}×
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              The integer multiple the algorithm natively operates at. Output is
+              exactly {explicitFactor}× the source — no tier alignment.
+            </p>
+          </div>
+        )}
+
+        {resMode === "custom" && (
+          <div className="flex flex-col gap-2" data-testid="resolution-custom-panel">
+            <label className="flex items-center gap-2 text-sm">
+              <span className="text-muted-foreground">Long edge</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                inputMode="numeric"
+                placeholder="e.g. 3000"
+                value={customLongEdgeText}
+                onChange={(e) => setCustomLongEdgeText(e.target.value)}
+                data-testid="custom-longedge-input"
+                className="w-40 rounded-md border border-input bg-background px-3 py-2 text-sm"
+              />
+              <span className="text-muted-foreground">px</span>
+            </label>
+            <p className="text-xs text-muted-foreground">
+              Enter the target long edge in pixels; aspect ratio is preserved. The
+              nearest supported factor runs, then a Lanczos resize lands exactly on
+              this size.
+            </p>
+          </div>
+        )}
+
+        {/* Live preview of how the goal resolves against the loaded source. Shows
+            the resolved factor and, for tier/custom, whether a residual Lanczos
+            adjustment applies — so the user understands the operation before
+            running. Surfaces the boundary rule inline (AC #4). */}
+        {source && <ResolutionPreview source={source} target={target} />}
       </div>
 
       {/* Content-type override — AI only (issue #7, ADR-0003). The classifier
@@ -497,6 +772,53 @@ function SettingsControls({
         </span>
       </label>
     </section>
+  );
+}
+
+/** The three resolution-input modes, in tab order. */
+const RES_MODES: readonly ResolutionInputMode[] = ["tier", "factor", "custom"];
+
+/** Short tab labels for each resolution-input mode (CONTEXT.md vocabulary). */
+const RES_MODE_LABEL: Record<ResolutionInputMode, string> = {
+  tier: "Resolution tier",
+  factor: "Upscale factor",
+  custom: "Custom long edge",
+};
+
+/**
+ * A live preview of how the chosen goal resolves against the loaded source:
+ * the integer factor that will run and, for tier/custom, whether a final
+ * Lanczos adjustment lands the output on the exact target. Also surfaces the
+ * noUpscale boundary inline (AC #4) so a below-source goal is explained here,
+ * not just at the trigger.
+ */
+function ResolutionPreview({
+  source,
+  target,
+}: {
+  source: SourceImage;
+  target: TargetSpec;
+}) {
+  const result = computeUpscaleFactor(
+    { width: source.width, height: source.height },
+    target,
+  );
+  if (result.noUpscale) {
+    return (
+      <p data-testid="resolution-preview" className="text-xs text-muted-foreground">
+        This target isn't larger than the source ({source.width} ×{" "}
+        {source.height}px), so no upscale will run.
+      </p>
+    );
+  }
+  const exact = result.residualAdjustment === 0;
+  return (
+    <p data-testid="resolution-preview" className="text-xs text-muted-foreground">
+      Will upscale at {result.factor}×
+      {exact
+        ? " — exact, no adjustment needed."
+        : " then Lanczos-adjust to the exact target."}
+    </p>
   );
 }
 
