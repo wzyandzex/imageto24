@@ -90,3 +90,14 @@ export {
 } from "./steps";
 
 export { processImage } from "./processImage";
+
+// Batch serial queue (issue #9): the multi-image pipeline. Serial by design —
+// each image is fully processed and released from memory before the next begins
+// (ADR-0001 browser-only memory constraint).
+export {
+  runBatch,
+  type BatchItem,
+  type BatchItemState,
+  type BatchItemStatus,
+  type BatchProgress,
+} from "./runBatch";

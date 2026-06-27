@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, ImageIcon, Loader2, Lock, Sparkles, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BatchPanel } from "@/components/BatchPanel";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
 import { browserCapabilityDetector } from "@/pipeline/browser/capability";
@@ -9,6 +10,7 @@ import {
   computeUpscaleFactor,
   estimateAiMemoryCost,
   resolveAiCapability,
+  type CapabilityDecision,
   type ContentType,
   type DeviceCapability,
   type ImageFormat,
@@ -215,6 +217,22 @@ function App() {
           </label>
         )}
 
+        {/* Shared settings: mode, target tier, content type, EXIF. These drive
+            both the single-image run and the batch queue, so they render
+            whether or not an image is loaded. A user configures once and runs
+            either flow. */}
+        <SettingsControls
+          mode={mode}
+          setMode={setMode}
+          tier={tier}
+          setTier={setTier}
+          contentTypeOverride={contentTypeOverride}
+          setContentTypeOverride={setContentTypeOverride}
+          preserveExif={preserveExif}
+          setPreserveExif={setPreserveExif}
+          aiDecision={aiDecision}
+        />
+
         {source && (
           <section className="flex flex-col gap-8">
             {/* Preview + original dimensions */}
@@ -242,100 +260,6 @@ function App() {
                 />
               </div>
             </div>
-
-            {/* Mode selector — AI is gated by the device capability check (issue #5). */}
-            <div className="flex flex-col gap-2">
-              <p className="text-sm font-medium">Mode</p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <ModeCard
-                  testId="mode-faithful"
-                  active={mode === "faithful"}
-                  icon={<ImageIcon className="size-5" />}
-                  title="Faithful"
-                  description="Mathematically lossless Lanczos interpolation. Zero detail invented."
-                  onSelect={() => setMode("faithful")}
-                />
-                <ModeCard
-                  testId="mode-ai"
-                  active={mode === "ai"}
-                  disabled={!aiDecision?.canRunAi}
-                  reason={aiDecision?.reason ?? undefined}
-                  icon={<Sparkles className="size-5" />}
-                  title="AI Enhance"
-                  description="Reconstructs detail for a higher-resolution result. Non-lossless — detail is generated."
-                  footnote="Powered by Real-ESRGAN (BSD-3-Clause). First use downloads a ~65MB model once; it's cached for next time."
-                  onSelect={() => setMode("ai")}
-                />
-              </div>
-            </div>
-
-            {/* Target resolution tier */}
-            <div className="flex flex-col gap-2">
-              <p className="text-sm font-medium">Target resolution</p>
-              <div className="flex gap-2">
-                {TIERS.map((t) => (
-                  <button
-                    key={t}
-                    data-testid={`tier-${t}`}
-                    onClick={() => setTier(t)}
-                    className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
-                      tier === t
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-input hover:bg-accent"
-                    }`}
-                  >
-                    {t}
-                    <span className="block text-xs opacity-70">{TIER_LONG_EDGE[t]}px</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Content-type override — AI only (issue #7, ADR-0003). The classifier
-                picks the model automatically; this is the correction path when it's
-                wrong. Forcing anime downloads the ~18MB anime model on first use. */}
-            {mode === "ai" && (
-              <div className="flex flex-col gap-2" data-testid="content-type-control">
-                <p className="text-sm font-medium">Content type</p>
-                <div className="flex gap-2">
-                  {(["auto", "photo", "anime"] as const).map((ct) => (
-                    <button
-                      key={ct}
-                      data-testid={`content-type-${ct}`}
-                      onClick={() => setContentTypeOverride(ct)}
-                      className={`flex-1 rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
-                        contentTypeOverride === ct
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "border-input hover:bg-accent"
-                      }`}
-                    >
-                      {ct === "auto" ? "Auto-detect" : ct === "photo" ? "Photo" : "Anime"}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {contentTypeOverride === "auto"
-                    ? "We detect this automatically. Override if the result looks wrong."
-                    : contentTypeOverride === "anime"
-                      ? "Uses the anime model — an extra ~18MB download on first use (cached afterwards)."
-                      : "Uses the general (photo) model."}
-                </p>
-              </div>
-            )}
-
-            {/* EXIF option */}
-            <label className="flex items-center gap-2 text-sm" data-testid="exif-control">
-              <input
-                type="checkbox"
-                checked={preserveExif}
-                onChange={(e) => setPreserveExif(e.target.checked)}
-                className="size-4 rounded border-input"
-              />
-              <span>Preserve EXIF metadata</span>
-              <span className="text-muted-foreground">
-                (uncheck to strip — applied on JPEG output)
-              </span>
-            </label>
 
             {/* Trigger + progress */}
             <div className="flex flex-col gap-3">
@@ -389,6 +313,18 @@ function App() {
             )}
           </section>
         )}
+
+        {/* Batch queue (issue #9). Available even without a single image loaded
+            — it has its own multi-file picker. Shares the mode/tier/content-type/
+            EXIF controls above so a user configures once and runs either flow. */}
+        <BatchPanel
+          options={{
+            mode,
+            tier,
+            contentTypeOverride,
+            preserveExif,
+          }}
+        />
       </div>
     </main>
   );
@@ -433,6 +369,135 @@ function aiCostForTarget(source: SourceImage | null, tier: ResolutionTier): numb
   );
   if (result.noUpscale || result.factor === undefined) return 0;
   return estimateAiMemoryCost(source.width * source.height, result.factor);
+}
+
+interface SettingsControlsProps {
+  mode: ProcessingMode;
+  setMode: (m: ProcessingMode) => void;
+  tier: ResolutionTier;
+  setTier: (t: ResolutionTier) => void;
+  contentTypeOverride: "auto" | ContentType;
+  setContentTypeOverride: (ct: "auto" | ContentType) => void;
+  preserveExif: boolean;
+  setPreserveExif: (v: boolean) => void;
+  /** AI-capability decision (null while the probe is pending). */
+  aiDecision: CapabilityDecision | null;
+}
+
+/**
+ * The shared settings block: mode, target tier, content-type override, EXIF.
+ * Rendered regardless of whether an image is loaded, because the batch flow
+ * (issue #9) is independently configurable and needs the tier/mode controls
+ * visible without first uploading a single image.
+ */
+function SettingsControls({
+  mode,
+  setMode,
+  tier,
+  setTier,
+  contentTypeOverride,
+  setContentTypeOverride,
+  preserveExif,
+  setPreserveExif,
+  aiDecision,
+}: SettingsControlsProps) {
+  return (
+    <section className="flex flex-col gap-8">
+      {/* Mode selector — AI is gated by the device capability check (issue #5). */}
+      <div className="flex flex-col gap-2">
+        <p className="text-sm font-medium">Mode</p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <ModeCard
+            testId="mode-faithful"
+            active={mode === "faithful"}
+            icon={<ImageIcon className="size-5" />}
+            title="Faithful"
+            description="Mathematically lossless Lanczos interpolation. Zero detail invented."
+            onSelect={() => setMode("faithful")}
+          />
+          <ModeCard
+            testId="mode-ai"
+            active={mode === "ai"}
+            disabled={!aiDecision?.canRunAi}
+            reason={aiDecision?.reason ?? undefined}
+            icon={<Sparkles className="size-5" />}
+            title="AI Enhance"
+            description="Reconstructs detail for a higher-resolution result. Non-lossless — detail is generated."
+            footnote="Powered by Real-ESRGAN (BSD-3-Clause). First use downloads a ~65MB model once; it's cached for next time."
+            onSelect={() => setMode("ai")}
+          />
+        </div>
+      </div>
+
+      {/* Target resolution tier */}
+      <div className="flex flex-col gap-2">
+        <p className="text-sm font-medium">Target resolution</p>
+        <div className="flex gap-2">
+          {TIERS.map((t) => (
+            <button
+              key={t}
+              data-testid={`tier-${t}`}
+              onClick={() => setTier(t)}
+              className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
+                tier === t
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input hover:bg-accent"
+              }`}
+            >
+              {t}
+              <span className="block text-xs opacity-70">{TIER_LONG_EDGE[t]}px</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Content-type override — AI only (issue #7, ADR-0003). The classifier
+          picks the model automatically; this is the correction path when it's
+          wrong. Forcing anime downloads the ~18MB anime model on first use. */}
+      {mode === "ai" && (
+        <div className="flex flex-col gap-2" data-testid="content-type-control">
+          <p className="text-sm font-medium">Content type</p>
+          <div className="flex gap-2">
+            {(["auto", "photo", "anime"] as const).map((ct) => (
+              <button
+                key={ct}
+                data-testid={`content-type-${ct}`}
+                onClick={() => setContentTypeOverride(ct)}
+                className={`flex-1 rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
+                  contentTypeOverride === ct
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input hover:bg-accent"
+                }`}
+              >
+                {ct === "auto" ? "Auto-detect" : ct === "photo" ? "Photo" : "Anime"}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {contentTypeOverride === "auto"
+              ? "We detect this automatically. Override if the result looks wrong."
+              : contentTypeOverride === "anime"
+                ? "Uses the anime model — an extra ~18MB download on first use (cached afterwards)."
+                : "Uses the general (photo) model."}
+          </p>
+        </div>
+      )}
+
+      {/* EXIF option */}
+      <label className="flex items-center gap-2 text-sm" data-testid="exif-control">
+        <input
+          type="checkbox"
+          checked={preserveExif}
+          onChange={(e) => setPreserveExif(e.target.checked)}
+          className="size-4 rounded border-input"
+        />
+        <span>Preserve EXIF metadata</span>
+        <span className="text-muted-foreground">
+          (uncheck to strip — applied on JPEG output)
+        </span>
+      </label>
+    </section>
+  );
 }
 
 interface ModeCardProps {
