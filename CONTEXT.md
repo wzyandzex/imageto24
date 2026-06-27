@@ -59,3 +59,14 @@ _Avoid_: Feature detection (too generic), compatibility check
 **Batch queue**:
 The serial processing pipeline for multiple images — each image is decoded, processed, encoded, and released from memory before the next begins, preventing out-of-memory failures.
 _Avoid_: Batch processing (ambiguous about parallelism), queue (too generic)
+
+### Run readiness
+
+**Run readiness**:
+The full set of run-orchestration decisions derived (purely) from the probed device capability, the loaded source, and the user's options: which mode would actually run, whether AI is available and why, the resolved target, the computed factor, whether the trigger is disabled, and the effective output. Computed in one pass by `resolveRunReadiness`; the thin `useRunReadiness` hook owns only the capability-probe side effect.
+_Avoid_: Run config, run state (conflicts with runtime state like status/result), readiness check (too narrow)
+
+**Effective mode**:
+The mode a run would actually target — the user's selection, downgraded to faithful when AI is unavailable. A derived value, never a mutation of the user's selection. The user's `mode` is preserved; `effectiveMode` is what the UI displays as the active run target and what the run consumes.
+_Avoid_: Actual mode, forced mode, resolved mode (ambiguous with the user's choice)
+
