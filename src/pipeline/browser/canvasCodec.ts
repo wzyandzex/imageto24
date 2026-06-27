@@ -18,15 +18,22 @@ import type {
   ImageData,
   ImageFormat,
 } from "../types";
+import { outputMime } from "../formats";
 import { applyExifOption } from "../exif";
 
 /**
  * Decode an encoded file into RGBA {@link ImageData} via createImageBitmap + a
- * Canvas readback. JPEG/PNG/WebP/AVIF/GIF(first frame) are all browser-native.
+ * Canvas readback. JPEG/PNG/WebP/AVIF are decoded natively (`decodeStrategy`
+ * "native"); GIF is decoded to its first frame ("firstFrame") —
+ * `createImageBitmap` yields the still first frame, which is what the v1
+ * pipeline processes (per-frame enhancement is out of scope, PRD §Out of scope).
  */
 export const browserDecoder: DecoderDeps = {
-  async decode(buffer, _format): Promise<ImageData> {
-    // createImageBitmap handles all browser-native formats including GIF first frame.
+  async decode(buffer, format): Promise<ImageData> {
+    // createImageBitmap handles all browser-native formats including GIF first
+    // frame and AVIF. The `format` arg drives the decodeStrategy policy above;
+    // the browser codec is format-agnostic at this layer.
+    void format;
     const blob = new Blob([buffer]);
     const bitmap = await createImageBitmap(blob);
     try {
@@ -46,26 +53,31 @@ export const browserDecoder: DecoderDeps = {
   },
 };
 
-/** Map a pipeline ImageFormat to a Canvas toBlob MIME type. */
+/**
+ * Map a pipeline output format to a Canvas toBlob MIME type. The encoder only
+ * ever receives the v1 output matrix (PNG / WebP / JPEG — AVIF and GIF are
+ * input-only, see {@link outputMime}); this is a typed cast onto that helper.
+ */
 function mimeType(format: ImageFormat): string {
-  switch (format) {
-    case "png":
-      return "image/png";
-    case "webp":
-      return "image/webp";
-    case "jpeg":
-      return "image/jpeg";
-    case "avif":
-      return "image/avif";
-    case "gif":
-      // Canvas cannot encode animated GIF; encode as PNG for faithful output.
-      return "image/png";
-  }
+  return outputMime(format as "png" | "webp" | "jpeg");
 }
 
-/** Quality argument for toBlob — only meaningful for lossy formats. */
-function quality(_options: EncodeOptions): number | undefined {
-  // Faithful mode is always lossless; lossy quality tuning is a later slice.
+/**
+ * Quality argument for toBlob — only meaningful for lossy formats (issue #10).
+ *
+ * Faithful output is always lossless (the lossless promise), so this is only
+ * reached for AI-mode lossy WebP or JPEG. A high default (0.92) keeps the
+ * "enhance, then compress" result visually faithful while still shrinking the
+ * file vs. the lossless path. JPEG and lossy WebP both consume it as a 0–1
+ * quality; PNG ignores it (inherently lossless).
+ */
+const LOSSY_DEFAULT_QUALITY = 0.92;
+function quality(options: EncodeOptions): number | undefined {
+  if (options.lossless) return undefined;
+  // Only lossy containers honour quality; PNG is always lossless regardless.
+  if (options.format === "webp" || options.format === "jpeg") {
+    return LOSSY_DEFAULT_QUALITY;
+  }
   return undefined;
 }
 

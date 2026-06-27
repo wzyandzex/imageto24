@@ -20,6 +20,7 @@ export type {
   ModelLoaderDeps,
   ModelLoadProgress,
   ModelLoadProgressCb,
+  OutputFormat,
   PipelineDeps,
   ProcessImageMeta,
   ProcessImageOptions,
@@ -90,6 +91,20 @@ export {
 } from "./steps";
 
 export { processImage } from "./processImage";
+
+// Format matrix (issue #10): the pure policy above the browser codecs. The input
+// codec (AVIF + GIF first-frame) is browser-native; these helpers decide decode
+// strategy and resolve output format per the faithful lossless promise.
+export {
+  OUTPUT_FORMATS,
+  decodeStrategy,
+  isOutputFormat,
+  outputExtension,
+  outputMime,
+  resolveOutput,
+  type DecodeStrategy,
+  type ResolvedOutput,
+} from "./formats";
 
 // Batch serial queue (issue #9): the multi-image pipeline. Serial by design —
 // each image is fully processed and released from memory before the next begins

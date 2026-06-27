@@ -460,3 +460,96 @@ describe("processImage — resolution control variants (issue #8)", () => {
     expect(result.meta.factor).toBeUndefined();
   });
 });
+
+describe("processImage — output format resolution (issue #10)", () => {
+  it("threads the chosen output format and lossless flag through to the encoder in AI mode", async () => {
+    const { deps, log } = makeStubDeps({ webgpu: true });
+
+    await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "ai",
+        target: { tier: "4K" },
+        outputFormat: "webp",
+        lossless: false,
+        preserveExif: false,
+        contentType: "photo",
+      },
+    );
+
+    // AI mode permits the full matrix: lossy WebP passes through unchanged.
+    expect(log.encode).toEqual([
+      { format: "webp", lossless: false, preserveExif: false },
+    ]);
+  });
+
+  it("coerces a JPEG selection to lossless WebP in faithful mode (lossless promise)", async () => {
+    // The UI should not offer JPEG under faithful, but the orchestrator is the
+    // defensive backstop — it must never emit a lossy result. A JPEG selection
+    // is coerced to lossless WebP regardless of the caller's lossless flag.
+    const { deps, log } = makeStubDeps({ webgpu: true });
+
+    await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "faithful",
+        target: { tier: "4K" },
+        outputFormat: "jpeg",
+        lossless: false,
+        preserveExif: true,
+      },
+    );
+
+    expect(log.encode).toEqual([
+      { format: "webp", lossless: true, preserveExif: true },
+    ]);
+  });
+
+  it("forces lossless WebP when faithful mode is selected with a lossy WebP choice", async () => {
+    const { deps, log } = makeStubDeps({ webgpu: true });
+
+    await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "faithful",
+        target: { tier: "4K" },
+        outputFormat: "webp",
+        lossless: false,
+        preserveExif: true,
+      },
+    );
+
+    // Faithful mode permits WebP only as a lossless container.
+    expect(log.encode).toEqual([
+      { format: "webp", lossless: true, preserveExif: true },
+    ]);
+  });
+
+  it("coerces output to lossless when AI degrades to faithful (no WebGPU)", async () => {
+    // The user picked lossy JPEG under AI mode, but the device can't run AI — so
+    // the orchestrator degrades to faithful, and the lossless guard must then
+    // coerce the lossy JPEG to lossless WebP. The format resolution runs *after*
+    // the capability gate, so the downgrade's output is always lossless.
+    const { deps, log } = makeStubDeps({ webgpu: false });
+
+    await processImage(
+      deps,
+      { buffer: new ArrayBuffer(16), format: "png" },
+      {
+        mode: "ai",
+        target: { tier: "4K" },
+        outputFormat: "jpeg",
+        lossless: false,
+        preserveExif: true,
+      },
+    );
+
+    expect(log.upscale[0].mode).toBe("faithful");
+    expect(log.encode).toEqual([
+      { format: "webp", lossless: true, preserveExif: true },
+    ]);
+  });
+});

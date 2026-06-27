@@ -24,6 +24,14 @@ export interface ImageData {
 /** Image formats the pipeline understands, for both decode and encode. */
 export type ImageFormat = "jpeg" | "png" | "webp" | "avif" | "gif";
 
+/**
+ * The subset of {@link ImageFormat} a user may select for *output* (issue #10).
+ * AVIF and GIF are input-only — Canvas cannot reliably encode them in every
+ * target browser. Defined as a type alias (not a literal re-declaration) so the
+ * two stay in sync if the input set ever changes.
+ */
+export type OutputFormat = "png" | "webp" | "jpeg";
+
 /** A named resolution goal (see CONTEXT.md "Target resolution tier"). */
 export type ResolutionTier = "1080p" | "2K" | "4K";
 
@@ -222,7 +230,13 @@ export interface EncodeOptions {
 export interface ProcessImageOptions {
   readonly mode: ProcessingMode;
   readonly target: TargetSpec;
-  readonly outputFormat: ImageFormat;
+  /**
+   * The user's chosen output format (issue #10). Constrained to the v1 output
+   * matrix (PNG / WebP / JPEG); AVIF and GIF are input-only. The orchestrator
+   * further constrains this for faithful mode (PNG / lossless WebP) via
+   * {@link resolveOutput} — never trust the caller to honour the lossless promise.
+   */
+  readonly outputFormat: OutputFormat;
   readonly lossless: boolean;
   readonly preserveExif: boolean;
   readonly contentType?: ContentType;

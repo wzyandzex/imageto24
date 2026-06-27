@@ -6,15 +6,20 @@ import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
 import { browserCapabilityDetector } from "@/pipeline/browser/capability";
 import {
+  OUTPUT_FORMATS,
   TIER_LONG_EDGE,
   computeUpscaleFactor,
   estimateAiMemoryCost,
+  outputExtension,
+  outputMime,
   resolveAiCapability,
+  resolveOutput,
   type CapabilityDecision,
   type ContentType,
   type DeviceCapability,
   type ImageFormat,
   type ModelLoadProgress,
+  type OutputFormat,
   type ProcessImageResult,
   type ProcessingMode,
   type ResolutionTier,
@@ -57,6 +62,14 @@ function App() {
   const [explicitFactor, setExplicitFactor] = useState<UpscaleFactor>(4);
   const [customLongEdgeText, setCustomLongEdgeText] = useState("");
   const [preserveExif, setPreserveExif] = useState(true);
+  // Output format selection (issue #10): PNG / WebP / JPEG. Faithful mode
+  // constrains the *effective* output to PNG or lossless WebP (the lossless
+  // promise) — the orchestrator coerces defensively, and the UI also reflects
+  // that constraint by explaining which choices are lossless-only under faithful.
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>("png");
+  // The lossless/lossy toggle only applies to WebP under AI mode (PNG is always
+  // lossless; JPEG is always lossy). Ignored when not WebP.
+  const [webpLossless, setWebpLossless] = useState(true);
   const [contentTypeOverride, setContentTypeOverride] = useState<"auto" | ContentType>("auto");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +88,14 @@ function App() {
   // A short label for the active goal, used on the trigger, the download link,
   // and the batch download filenames (e.g. "4K", "4x", "3000px").
   const targetLabel = resolveTargetLabel(resMode, tier, explicitFactor, customLongEdgeText);
+
+  // The effective output format + lossless flag after applying the mode's
+  // constraints (issue #10). Faithful mode coerces JPEG/lossy-WebP to a
+  // lossless result; this mirrors the orchestrator's defensive guard so the UI
+  // shows the user the *actual* output, and so the run/batch send the resolved
+  // values rather than a choice the orchestrator would override anyway.
+  const effectiveOutput = resolveOutput(mode, outputFormat, webpLossless);
+  const effectiveExt = outputExtension(effectiveOutput.format);
 
   // Whether the single-run trigger would be a silent no-op: the chosen goal
   // doesn't resolve to an upscale against the loaded source (boundary rule,
@@ -130,6 +151,18 @@ function App() {
     }
   }, [aiDecision, mode]);
 
+  // Output-format snap (issue #10): when the user lands in faithful mode, JPEG
+  // (lossy by nature) is not a valid output — the orchestrator coerces it to
+  // lossless WebP anyway. Snap the selection to WebP so the UI's highlighted
+  // card matches the actual output, rather than leaving a disabled JPEG card
+  // selected. Lossless WebP keeps the closest container to the user's intent.
+  useEffect(() => {
+    if (mode === "faithful" && outputFormat === "jpeg") {
+      setOutputFormat("webp");
+      setWebpLossless(true);
+    }
+  }, [mode, outputFormat]);
+
   // Load a chosen file: read bytes, probe dimensions via an Image, stash state.
   const loadFile = useCallback(async (file: File) => {
     setError(null);
@@ -184,8 +217,8 @@ function App() {
             // `computeUpscaleFactor` inside the orchestrator handles all three —
             // no orchestrator changes were needed for issue #8.
             target,
-            outputFormat: "png",
-            lossless: true,
+            outputFormat: effectiveOutput.format,
+            lossless: effectiveOutput.lossless,
             preserveExif,
             // Manual content-type override (issue #7): when the user picks photo or
             // anime explicitly it wins over the classifier; "auto" leaves the call
@@ -205,7 +238,7 @@ function App() {
       setResult(res);
       setModelProgress(null);
       if (resultUrl) URL.revokeObjectURL(resultUrl);
-      const blob = new Blob([res.buffer], { type: "image/png" });
+      const blob = new Blob([res.buffer], { type: outputMime(effectiveOutput.format) });
       const url = URL.createObjectURL(blob);
       setResultUrl(url);
       setStatus("done");
@@ -214,11 +247,11 @@ function App() {
       setStatus("error");
       setModelProgress(null);
     }
-  }, [source, mode, target, preserveExif, contentTypeOverride, resultUrl]);
+  }, [source, mode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput]);
 
   const downloadName = source
-    ? source.file.name.replace(/\.[^.]+$/, "") + `_${targetLabel}_upscaled.png`
-    : "upscaled.png";
+    ? source.file.name.replace(/\.[^.]+$/, "") + `_${targetLabel}_upscaled.${effectiveExt}`
+    : `upscaled.${effectiveExt}`;
 
   return (
     <main className="min-h-dvh bg-background text-foreground">
@@ -283,6 +316,10 @@ function App() {
           preserveExif={preserveExif}
           setPreserveExif={setPreserveExif}
           aiDecision={aiDecision}
+          outputFormat={outputFormat}
+          setOutputFormat={setOutputFormat}
+          webpLossless={webpLossless}
+          setWebpLossless={setWebpLossless}
         />
 
         {source && (
@@ -373,7 +410,7 @@ function App() {
             {status === "done" && resultUrl && (
               <Button asChild size="lg" variant="secondary">
                 <a data-testid="download" href={resultUrl} download={downloadName}>
-                  <Download /> Download {targetLabel} PNG
+                  <Download /> Download {targetLabel} {effectiveExt.toUpperCase()}
                 </a>
               </Button>
             )}
@@ -392,6 +429,8 @@ function App() {
             targetLabel,
             contentTypeOverride,
             preserveExif,
+            outputFormat: effectiveOutput.format,
+            lossless: effectiveOutput.lossless,
           }}
         />
       </div>
@@ -561,6 +600,12 @@ interface SettingsControlsProps {
   setPreserveExif: (v: boolean) => void;
   /** AI-capability decision (null while the probe is pending). */
   aiDecision: CapabilityDecision | null;
+  /** Chosen output format (issue #10). */
+  outputFormat: OutputFormat;
+  setOutputFormat: (f: OutputFormat) => void;
+  /** WebP lossless/lossy toggle (issue #10); only meaningful for WebP. */
+  webpLossless: boolean;
+  setWebpLossless: (v: boolean) => void;
 }
 
 /**
@@ -593,6 +638,10 @@ function SettingsControls({
   preserveExif,
   setPreserveExif,
   aiDecision,
+  outputFormat,
+  setOutputFormat,
+  webpLossless,
+  setWebpLossless,
 }: SettingsControlsProps) {
   return (
     <section className="flex flex-col gap-8">
@@ -758,6 +807,19 @@ function SettingsControls({
         </div>
       )}
 
+      {/* Output format selector (issue #10). PNG / WebP / JPEG. Faithful mode
+          enforces the lossless promise: JPEG and lossy WebP are explained as
+          lossless-only under faithful (the orchestrator coerces defensively;
+          the UI states the constraint honestly). WebP exposes a lossless toggle
+          under AI mode. */}
+      <OutputFormatControl
+        mode={mode}
+        outputFormat={outputFormat}
+        setOutputFormat={setOutputFormat}
+        webpLossless={webpLossless}
+        setWebpLossless={setWebpLossless}
+      />
+
       {/* EXIF option */}
       <label className="flex items-center gap-2 text-sm" data-testid="exif-control">
         <input
@@ -866,6 +928,114 @@ function ModeCard({ icon, title, description, active, disabled, badge, reason, f
       {disabled && reason && (
         <p className="text-xs text-muted-foreground">{reason}</p>
       )}
+    </div>
+  );
+}
+
+/** Human label + short description for each output format (issue #10). */
+const OUTPUT_FORMAT_LABEL: Record<OutputFormat, string> = {
+  png: "PNG",
+  webp: "WebP",
+  jpeg: "JPEG",
+};
+
+interface OutputFormatControlProps {
+  mode: ProcessingMode;
+  outputFormat: OutputFormat;
+  setOutputFormat: (f: OutputFormat) => void;
+  webpLossless: boolean;
+  setWebpLossless: (v: boolean) => void;
+}
+
+/**
+ * The output format selector (issue #10): PNG / WebP / JPEG.
+ *
+ * Faithful mode honours the lossless promise, so JPEG (lossy by nature) and a
+ * lossy WebP are not valid faithful outputs. Rather than hiding them, the cards
+ * stay visible but are disabled with an honest reason — the user understands
+ * *why* their choice is constrained rather than wondering where it went. PNG and
+ * (under AI) WebP's lossless/lossy toggle remain fully usable.
+ *
+ * HEIC is explicitly out of scope for v1 (target v2); the notice below states
+ * this so iOS users aren't surprised when their photos aren't accepted.
+ */
+function OutputFormatControl({
+  mode,
+  outputFormat,
+  setOutputFormat,
+  webpLossless,
+  setWebpLossless,
+}: OutputFormatControlProps) {
+  const faithful = mode === "faithful";
+  return (
+    <div className="flex flex-col gap-2" data-testid="output-format-control">
+      <p className="text-sm font-medium">Output format</p>
+      <div className="flex gap-2">
+        {OUTPUT_FORMATS.map((f) => {
+          // Faithful mode disables lossy choices honestly rather than hiding
+          // them: JPEG is always lossy, so it's never a valid faithful output;
+          // WebP is permitted but only as lossless.
+          const disabled = faithful && f === "jpeg";
+          const reason = disabled
+            ? "Faithful mode is lossless — JPEG can't be. Pick PNG or lossless WebP."
+            : undefined;
+          const selected = outputFormat === f;
+          return (
+            <button
+              key={f}
+              data-testid={`output-format-${f}`}
+              onClick={() => !disabled && setOutputFormat(f)}
+              disabled={disabled}
+              aria-pressed={selected}
+              title={reason}
+              className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
+                selected
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : disabled
+                    ? "border-input text-muted-foreground/50 cursor-not-allowed"
+                    : "border-input hover:bg-accent"
+              }`}
+            >
+              {OUTPUT_FORMAT_LABEL[f]}
+            </button>
+          );
+        })}
+      </div>
+      {/* WebP lossless toggle — only meaningful under WebP. Under faithful it is
+          forced on (the lossless promise); show it locked to make the contract
+          legible rather than silently overriding. */}
+      {outputFormat === "webp" && (
+        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            data-testid="webp-lossless-toggle"
+            checked={faithful ? true : webpLossless}
+            disabled={faithful}
+            onChange={(e) => setWebpLossless(e.target.checked)}
+            className="size-4 rounded border-input"
+          />
+          <span>
+            {faithful
+              ? "Lossless (required by faithful mode)"
+              : webpLossless
+                ? "Lossless WebP"
+                : "Lossy WebP (smaller file)"}
+          </span>
+        </label>
+      )}
+      <p className="text-xs text-muted-foreground" data-testid="output-format-hint">
+        {faithful
+          ? outputFormat === "jpeg"
+            ? "Faithful mode is lossless, so your JPEG choice will be saved as lossless WebP instead."
+            : "Faithful output is always lossless — PNG or lossless WebP."
+          : "AI mode supports all three formats."}
+      </p>
+      {/* HEIC is out of scope for v1 (target v2). Stated clearly so iOS users
+          convert to JPEG first rather than being surprised by a rejection. */}
+      <p className="text-xs text-muted-foreground" data-testid="heic-notice">
+        HEIC/HEIF (Apple photos) isn't supported yet — convert to JPEG first.
+        Coming in a future release.
+      </p>
     </div>
   );
 }

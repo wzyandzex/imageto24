@@ -20,6 +20,7 @@ import { upscale } from "./steps";
 import { computeUpscaleFactor, tierToLongEdge } from "./computeUpscaleFactor";
 import { dimsForLongEdge } from "./lanczos";
 import { estimateAiMemoryCost, resolveAiCapability } from "./capability";
+import { resolveOutput } from "./formats";
 import type {
   AiModel,
   ExactTargetSize,
@@ -61,6 +62,13 @@ export async function processImage(
     // Graceful degradation: no WebGPU ⇒ AI unavailable.
     mode = "faithful";
   }
+
+  // Resolve the output format *after* the capability gate may have downgraded
+  // AI → faithful. Faithful mode must never emit a lossy result, so a JPEG or
+  // lossy-WebP choice is coerced here as a defensive backstop (issue #10). The
+  // UI restricts the choices too; the orchestrator never trusts the caller to
+  // honour the lossless promise.
+  const resolved = resolveOutput(mode, options.outputFormat, options.lossless);
 
   // 2. Decode.
   const imageData = await decode(deps.decoder, file.buffer, file.format);
@@ -132,10 +140,11 @@ export async function processImage(
     factorMeta = undefined;
   }
 
-  // 6. Encode.
+  // 6. Encode. The resolved format/lossless honour the mode's constraints —
+  //    faithful mode never emits lossy output (issue #10, resolved above).
   const buffer = await encode(deps.encoder, output, {
-    format: options.outputFormat,
-    lossless: options.lossless,
+    format: resolved.format,
+    lossless: resolved.lossless,
     preserveExif: options.preserveExif,
   });
 

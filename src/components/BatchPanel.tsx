@@ -25,6 +25,8 @@ import { Button } from "@/components/ui/button";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
 import {
+  outputExtension,
+  outputMime,
   runBatch,
   type BatchItem,
   type BatchProgress,
@@ -33,6 +35,7 @@ import type {
   ContentType,
   ImageFormat,
   ModelLoadProgress,
+  OutputFormat,
   ProcessingMode,
   TargetSpec,
 } from "@/pipeline";
@@ -49,13 +52,19 @@ interface BatchOptions {
   targetLabel: string;
   contentTypeOverride: "auto" | ContentType;
   preserveExif: boolean;
+  /**
+   * The effective output format + lossless flag (issue #10), already resolved
+   * for the active mode by the parent (faithful coerces to PNG/lossless WebP).
+   * Sent verbatim so the batch's per-item runs match the single-image run.
+   */
+  outputFormat: OutputFormat;
+  lossless: boolean;
 }
 
 /** A batch item plus its derived download URL once processed. */
 interface BatchRow {
   id: string;
   name: string;
-  downloadName: string;
   buffer: ArrayBuffer;
   format: ImageFormat;
   /**
@@ -95,12 +104,10 @@ export function BatchPanel({ options }: BatchPanelProps) {
       const rows: BatchRow[] = [];
       for (const file of files) {
         const format = formatFromFile(file);
-        const base = file.name.replace(/\.[^.]+$/, "");
         const buffer = await file.arrayBuffer();
         rows.push({
           id: `${file.name}-${rows.length}`,
           name: file.name,
-          downloadName: `${base}_${options.targetLabel}_upscaled.png`,
           buffer,
           format: format ?? "png",
           formatError: format ? null : `Unsupported file type: ${file.type || file.name}`,
@@ -140,8 +147,8 @@ export function BatchPanel({ options }: BatchPanelProps) {
               options: {
                 mode: options.mode,
                 target: options.target,
-                outputFormat: "png",
-                lossless: true,
+                outputFormat: options.outputFormat,
+                lossless: options.lossless,
                 preserveExif: options.preserveExif,
                 contentType:
                   options.mode === "ai" && options.contentTypeOverride !== "auto"
@@ -163,7 +170,9 @@ export function BatchPanel({ options }: BatchPanelProps) {
             // once here (not in render) so URLs are stable across re-renders.
             for (const it of p.items) {
               if (it.status === "done" && it.result && !urls.has(it.id)) {
-                const blob = new Blob([it.result.buffer], { type: "image/png" });
+                const blob = new Blob([it.result.buffer], {
+                  type: outputMime(options.outputFormat),
+                });
                 urls.set(it.id, URL.createObjectURL(blob));
               }
             }
@@ -205,12 +214,13 @@ export function BatchPanel({ options }: BatchPanelProps) {
     // multi-file saves, so we space them out slightly. No server is involved —
     // the blobs are already in memory.
     const done = state.progress.items.filter((it) => it.status === "done");
+    const ext = outputExtension(options.outputFormat);
     done.forEach((it, i) => {
       const url = state.urls.get(it.id);
       if (!url) return;
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.png`;
+      a.download = `${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.${ext}`;
       setTimeout(() => a.click(), i * 250);
     });
   }, [state, options.targetLabel]);
@@ -311,7 +321,7 @@ export function BatchPanel({ options }: BatchPanelProps) {
                   <a
                     data-testid={`batch-download-${it.id}`}
                     href={state.urls.get(it.id)}
-                    download={`${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.png`}
+                    download={`${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.${outputExtension(options.outputFormat)}`}
                     className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent"
                     aria-label={`Download ${it.name}`}
                   >
