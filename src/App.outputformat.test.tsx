@@ -107,16 +107,21 @@ describe("output format selector — faithful lossless promise (issue #10 AC)", 
     expect(screen.getByTestId("output-format-hint").textContent).toMatch(/lossless/i);
   });
 
-  it("snaps a JPEG selection to WebP when the user switches to faithful mode", async () => {
+  it("keeps a JPEG selection selected under faithful mode but resolves it to lossless WebP", async () => {
+    // Architecture review candidate #2: the snap-back `useEffect` that rewrote
+    // the user's outputFormat is gone. The user's selection is now preserved
+    // (JPEG stays pressed); the *effective* output is derived as lossless WebP
+    // and surfaced via the hint, not by mutating the selection.
     await renderApp();
     // Pick JPEG under AI mode first.
     fireEvent.click(screen.getByTestId("mode-ai"));
     fireEvent.click(screen.getByTestId("output-format-jpeg"));
     expect(screen.getByTestId("output-format-jpeg")).toHaveAttribute("aria-pressed", "true");
-    // Switch to faithful: JPEG is invalid there, so the selection snaps to WebP.
+    // Switch to faithful: the selection is NOT rewritten — JPEG stays pressed.
     fireEvent.click(screen.getByTestId("mode-faithful"));
-    expect(screen.getByTestId("output-format-webp")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("output-format-jpeg")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("output-format-jpeg")).toHaveAttribute("aria-pressed", "true");
+    // But the effective output is lossless WebP, signalled through the hint.
+    expect(screen.getByTestId("output-format-hint").textContent).toMatch(/lossless/i);
   });
 });
 

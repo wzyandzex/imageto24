@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Download, Heart, ImageIcon, Loader2, Lock, ShieldCheck, Sparkles, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BatchPanel } from "@/components/BatchPanel";
@@ -6,19 +6,16 @@ import { PrivacyDialog } from "@/components/PrivacyDialog";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { SITE_LINKS } from "@/lib/siteLinks";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
-import { browserCapabilityDetector } from "@/pipeline/browser/capability";
+import { useRunReadiness } from "@/pipeline/useRunReadiness";
+import { targetLabel } from "@/pipeline/runReadiness";
 import {
   OUTPUT_FORMATS,
   TIER_LONG_EDGE,
   computeUpscaleFactor,
-  estimateAiMemoryCost,
   outputExtension,
   outputMime,
-  resolveAiCapability,
-  resolveOutput,
   type CapabilityDecision,
   type ContentType,
-  type DeviceCapability,
   type ImageFormat,
   type ModelLoadProgress,
   type OutputFormat,
@@ -27,6 +24,7 @@ import {
   type ResolutionTier,
   type TargetSpec,
   type UpscaleFactor,
+  type UpscaleFactorResult,
 } from "@/pipeline";
 
 type Status = "idle" | "processing" | "done" | "error";
@@ -89,84 +87,33 @@ function App() {
   // active input mode. `custom` with no/invalid entry → empty target (nothing
   // resolvable → `computeUpscaleFactor` returns noUpscale), which the UI also
   // surfaces as the boundary notice below.
-  const target = resolveTarget(resMode, tier, explicitFactor, customLongEdgeText);
-  // A short label for the active goal, used on the trigger, the download link,
-  // and the batch download filenames (e.g. "4K", "4x", "3000px").
-  const targetLabel = resolveTargetLabel(resMode, tier, explicitFactor, customLongEdgeText);
-
-  // The effective output format + lossless flag after applying the mode's
-  // constraints (issue #10). Faithful mode coerces JPEG/lossy-WebP to a
-  // lossless result; this mirrors the orchestrator's defensive guard so the UI
-  // shows the user the *actual* output, and so the run/batch send the resolved
-  // values rather than a choice the orchestrator would override anyway.
-  const effectiveOutput = resolveOutput(mode, outputFormat, webpLossless);
+  // The run-readiness decision — one deep module (architecture review
+  // candidate #2) collapses the five concerns that used to be smeared across
+  // this component (capability probe, AI-cost gating, target resolution,
+  // boundary check, output resolution). The hook owns only the capability
+  // probe side effect; everything else is pure (`resolveRunReadiness`).
+  //
+  // The user's `mode` is NOT mutated here. When AI is unavailable the downgrade
+  // appears in `readiness.effectiveMode`, never as a silent rewrite — the old
+  // snap-back `useEffect` is gone.
+  const { readiness } = useRunReadiness(
+    source ? { width: source.width, height: source.height } : null,
+    {
+      mode,
+      resMode,
+      tier,
+      explicitFactor,
+      customLongEdgeText,
+      outputFormat,
+      lossless: webpLossless,
+    },
+  );
+  const { effectiveMode, aiDecision, target, factorResult, effectiveOutput } = readiness;
   const effectiveExt = outputExtension(effectiveOutput.format);
-
-  // Whether the single-run trigger would be a silent no-op: the chosen goal
-  // doesn't resolve to an upscale against the loaded source (boundary rule,
-  // issue #8 AC #4). When true we disable the trigger and explain inline, so a
-  // target below the source is never a silent no-op.
-  const triggerDisabled = !!source && computeUpscaleFactor(
-    { width: source.width, height: source.height },
-    target,
-  ).noUpscale;
-
-  // Device capability check (issue #5, ADR-0002): probe WebGPU + memory budget
-  // once on mount. Faithful mode ignores the result and always runs; the AI
-  // option is gated by it. We never hard-error on an unsupported device.
-  const [capability, setCapability] = useState<DeviceCapability | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    browserCapabilityDetector
-      .checkDeviceCapability()
-      .then((cap) => {
-        if (!cancelled) setCapability(cap);
-      })
-      .catch(() => {
-        // A probe failure must never blank the page — fall back to "no AI".
-        if (!cancelled) setCapability({ webgpu: false, memBudget: 0 });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Derive the AI-capability decision from the probed capability and (when a
-  // source is loaded) the current source + resolution goal. WebGPU failures can
-  // be explained before upload; memory failures are image/target-specific and
-  // appear once the requested work is known.
-  // `capability === null` (probe pending) is treated as "AI not yet known" and
-  // keeps the option disabled rather than optimistically enabling it.
-  // Because the cost is computed from the full derived `target` (issue #8),
-  // switching to a larger explicit factor or custom size that blows the budget
-  // disables AI in place — exactly the boundary rule AC #5, reusing the #5
-  // machinery rather than a new warning component.
-  const aiDecision = capability
-    ? resolveAiCapability(
-        capability,
-        aiCostForTarget(source, target),
-      )
-    : null;
-  // When AI becomes unavailable (e.g. user picks a larger tier that blows the
-  // budget), snap an AI selection back to faithful so the run never targets an
-  // unsupported mode.
-  useEffect(() => {
-    if (aiDecision && !aiDecision.canRunAi && mode === "ai") {
-      setMode("faithful");
-    }
-  }, [aiDecision, mode]);
-
-  // Output-format snap (issue #10): when the user lands in faithful mode, JPEG
-  // (lossy by nature) is not a valid output — the orchestrator coerces it to
-  // lossless WebP anyway. Snap the selection to WebP so the UI's highlighted
-  // card matches the actual output, rather than leaving a disabled JPEG card
-  // selected. Lossless WebP keeps the closest container to the user's intent.
-  useEffect(() => {
-    if (mode === "faithful" && outputFormat === "jpeg") {
-      setOutputFormat("webp");
-      setWebpLossless(true);
-    }
-  }, [mode, outputFormat]);
+  const label = targetLabel(target);
+  // triggerDisabled from readiness + the separate "no source" guard the UI
+  // still owns (no run makes sense before an image is loaded).
+  const triggerDisabled = !source || readiness.triggerDisabled;
 
   // Load a chosen file: read bytes, probe dimensions via an Image, stash state.
   const loadFile = useCallback(async (file: File) => {
@@ -214,10 +161,13 @@ function App() {
           source: buffer,
           format: source.format,
           options: {
-            // The selected mode. When the device can't run AI the UI disables the
-            // option; the orchestrator also degrades AI→faithful defensively, so a
-            // stale mode can never crash the run (ADR-0002).
-            mode,
+            // The effective mode — the user's selection downgraded to faithful
+            // when AI is unavailable (readiness.effectiveMode). The old code
+            // relied on a snap-back `useEffect` to mutate `mode`; now the
+            // downgrade is derived and the user's selection is preserved.
+            // The orchestrator still degrades AI→faithful defensively too,
+            // so a stale effectiveMode can never crash the run (ADR-0002).
+            mode: effectiveMode,
             // The derived resolution goal (tier / factor / custom long edge).
             // `computeUpscaleFactor` inside the orchestrator handles all three —
             // no orchestrator changes were needed for issue #8.
@@ -229,7 +179,7 @@ function App() {
             // anime explicitly it wins over the classifier; "auto" leaves the call
             // absent so the orchestrator classifies the decoded pixels.
             contentType:
-              mode === "ai" && contentTypeOverride !== "auto"
+              effectiveMode === "ai" && contentTypeOverride !== "auto"
                 ? contentTypeOverride
                 : undefined,
           },
@@ -252,10 +202,10 @@ function App() {
       setStatus("error");
       setModelProgress(null);
     }
-  }, [source, mode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput]);
+  }, [source, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput]);
 
   const downloadName = source
-    ? source.file.name.replace(/\.[^.]+$/, "") + `_${targetLabel}_upscaled.${effectiveExt}`
+    ? source.file.name.replace(/\.[^.]+$/, "") + `_${label}_upscaled.${effectiveExt}`
     : `upscaled.${effectiveExt}`;
 
   return (
@@ -370,7 +320,7 @@ function App() {
             {source && (
               <BoundaryNotice
                 source={source}
-                target={target}
+                factorResult={factorResult}
               />
             )}
 
@@ -422,7 +372,7 @@ function App() {
             {status === "done" && resultUrl && (
               <Button asChild size="lg" variant="secondary">
                 <a data-testid="download" href={resultUrl} download={downloadName}>
-                  <Download /> Download {targetLabel} {effectiveExt.toUpperCase()}
+                  <Download /> Download {label} {effectiveExt.toUpperCase()}
                 </a>
               </Button>
             )}
@@ -436,9 +386,9 @@ function App() {
             the full tier/factor/custom choice. */}
         <BatchPanel
           options={{
-            mode,
+            mode: effectiveMode,
             target,
-            targetLabel,
+            targetLabel: label,
             contentTypeOverride,
             preserveExif,
             outputFormat: effectiveOutput.format,
@@ -532,110 +482,24 @@ function formatBytes(n: number): string {
 }
 
 /**
- * Resolve the active resolution-input mode to the `TargetSpec` the orchestrator
- * consumes. All three variants are already handled by `computeUpscaleFactor` —
- * this just maps the UI's mode to the matching field (issue #8).
- *
- * `custom` with a non-positive/non-integer entry yields an empty target: nothing
- * resolvable, so `computeUpscaleFactor` returns `noUpscale` and the UI surfaces
- * the boundary notice. A valid long edge is honoured exactly by the orchestrator
- * (the residual Lanczos lands it on the precise target).
- */
-function resolveTarget(
-  resMode: ResolutionInputMode,
-  tier: ResolutionTier,
-  explicitFactor: UpscaleFactor,
-  customLongEdgeText: string,
-): TargetSpec {
-  switch (resMode) {
-    case "tier":
-      return { tier };
-    case "factor":
-      return { factor: explicitFactor };
-    case "custom": {
-      const parsed = parseCustomLongEdge(customLongEdgeText);
-      return parsed !== undefined ? { customLongEdge: parsed } : {};
-    }
-  }
-}
-
-/**
- * Parse the custom long-edge text input. Accepts only a positive integer (the
- * target's long edge in pixels); returns `undefined` for blank/invalid input so
- * the caller maps it to an empty, unresolvable target.
- */
-function parseCustomLongEdge(text: string): number | undefined {
-  const trimmed = text.trim();
-  if (trimmed === "") return undefined;
-  const n = Number(trimmed);
-  if (!Number.isInteger(n) || n <= 0) return undefined;
-  return n;
-}
-
-/**
- * A short label for the active resolution goal — shown on the trigger, the
- * download link, and the batch download filenames. Keeps the three modes
- * legible in the UI (e.g. "4K", "4x", "3000px").
- */
-function resolveTargetLabel(
-  resMode: ResolutionInputMode,
-  tier: ResolutionTier,
-  explicitFactor: UpscaleFactor,
-  customLongEdgeText: string,
-): string {
-  switch (resMode) {
-    case "tier":
-      return tier;
-    case "factor":
-      return `${explicitFactor}x`;
-    case "custom": {
-      const parsed = parseCustomLongEdge(customLongEdgeText);
-      return parsed !== undefined ? `${parsed}px` : "—";
-    }
-  }
-}
-
-/**
- * Estimate the AI memory cost of upscaling the given source to the given goal,
- * for gating the AI option. Returns 0 — "no AI work to charge for" — when there
- * is no source yet or the target wouldn't upscale (target ≤ source). A 0 cost
- * means the memory gate is a no-op and only WebGPU presence decides, which keeps
- * the UI's gating consistent with the orchestrator (which skips the memory gate
- * on the noUpscale path).
- *
- * Takes the full derived `target` (issue #8), so a large explicit factor or a
- * big custom size that blows the budget disables AI in place — the AC #5 memory
- * boundary, reusing the #5 reason machinery.
- */
-function aiCostForTarget(source: SourceImage | null, target: TargetSpec): number {
-  if (!source) return 0;
-  const result = computeUpscaleFactor(
-    { width: source.width, height: source.height },
-    target,
-  );
-  if (result.noUpscale || result.factor === undefined) return 0;
-  return estimateAiMemoryCost(source.width * source.height, result.factor);
-}
-
-/**
  * The boundary notice: when the chosen goal does not exceed the source, the run
  * would be a no-op upscale. Per PRD user story #21 we tell the user rather than
  * silently doing nothing. Returns null when the goal is a real upscale (or when
  * the goal isn't yet resolvable, e.g. a blank custom field — the trigger is
  * disabled in that case too).
+ *
+ * Reads the already-computed `factorResult` from run readiness rather than
+ * re-running `computeUpscaleFactor` (architecture review candidate #2/#4:
+ * single source of truth for the factor).
  */
 function BoundaryNotice({
   source,
-  target,
+  factorResult,
 }: {
   source: SourceImage;
-  target: TargetSpec;
+  factorResult: UpscaleFactorResult;
 }) {
-  const result = computeUpscaleFactor(
-    { width: source.width, height: source.height },
-    target,
-  );
-  if (!result.noUpscale) return null;
+  if (!factorResult.noUpscale) return null;
   return (
     <p data-testid="boundary-noop" className="text-sm text-muted-foreground">
       Your target isn't larger than the original ({source.width} ×{" "}
