@@ -103,9 +103,19 @@ export function parseJpegSegments(buffer: ArrayBuffer): JpegSegment[] {
   return segments;
 }
 
-/** Extract the raw EXIF APP1 segment bytes from a JPEG, if present. */
+/**
+ * Extract the raw EXIF APP1 segment bytes from a JPEG, if present. Returns
+ * `undefined` when the buffer is not a JPEG (no JPEG segment parsing applies)
+ * or carries no EXIF — non-JPEG sources (e.g. HEIC) reach here harmlessly.
+ */
 export function extractExifSegment(buffer: ArrayBuffer): Uint8Array | undefined {
+  // Non-JPEG sources (HEIC, PNG, WebP, ...) carry no JPEG APP1 segment; bail
+  // rather than throwing inside parseJpegSegments. The encoder may still call
+  // this path when a non-JPEG source is upscaled to a JPEG output.
   const view = new DataView(buffer);
+  if (view.byteLength < 2 || view.getUint8(0) !== 0xff || view.getUint8(1) !== SOI) {
+    return undefined;
+  }
   const segments = parseJpegSegments(buffer);
   for (const seg of segments) {
     if (isExifApp1(seg, view)) {

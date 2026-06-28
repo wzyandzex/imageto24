@@ -38,11 +38,18 @@ describe("decodeStrategy — input format matrix (issue #10)", () => {
     expect(decodeStrategy("gif")).toBe("firstFrame");
   });
 
+  it("routes HEIC through the convert path (no native browser decoder)", () => {
+    // HEIC has no browser-native decoder, so the decoder seam transcodes it to a
+    // PNG bitmap via heic2any (lazy-loaded) before decoding. The rest of the
+    // pipeline is unaware HEIC ever existed (issue #15, PRD HEIC input).
+    expect(decodeStrategy("heic")).toBe("convert");
+  });
+
   it("covers every input format without falling through", () => {
     // A guard against a new ImageFormat being added without a decode decision.
-    const all: ImageFormat[] = ["jpeg", "png", "webp", "avif", "gif"];
+    const all: ImageFormat[] = ["jpeg", "png", "webp", "avif", "gif", "heic"];
     for (const f of all) {
-      expect(["native", "firstFrame"]).toContain(decodeStrategy(f));
+      expect(["native", "firstFrame", "convert"]).toContain(decodeStrategy(f));
     }
   });
 });
@@ -54,11 +61,12 @@ describe("isOutputFormat — output matrix boundary", () => {
     expect(isOutputFormat("jpeg")).toBe(true);
   });
 
-  it("rejects the input-only formats (AVIF, GIF) as outputs", () => {
+  it("rejects the input-only formats (AVIF, GIF, HEIC) as outputs", () => {
     // Canvas cannot reliably encode AVIF or animated GIF in every target browser,
-    // so they are input-only in v1.
+    // and no viable browser-side HEIC encoder exists - all three are input-only.
     expect(isOutputFormat("avif")).toBe(false);
     expect(isOutputFormat("gif")).toBe(false);
+    expect(isOutputFormat("heic")).toBe(false);
   });
 });
 

@@ -1,15 +1,19 @@
 /**
  * Browser-bound pipeline dependencies: Canvas/OffscreenCanvas decode & encode.
  *
- * These live behind the injectable seam (ADR-0001, PRD §"processing pipeline"):
+ * These live behind the injectable seam (ADR-0001, PRD "processing pipeline"):
  * the pure pipeline never touches a global; the browser wires the real codecs
  * into {@link PipelineDeps} here. These modules are environment-bound by design
- * and are *not* unit-tested under Vitest — the pure functions they wrap are the
+ * and are *not* unit-tested under Vitest - the pure functions they wrap are the
  * tested stronghold. Playwright exercises the wired result end-to-end.
  *
  * Browser-only APIs used: `createImageBitmap`, `OffscreenCanvas` / `HTMLCanvasElement`,
  * and Canvas 2D `getImageData` / `convertToBlob`. All are standard and supported
  * in every modern browser; there is no polyfill.
+ *
+ * HEIC is the one input format with no browser-native decoder. Its bytes are
+ * transcoded to a PNG blob via `heic2any` (lazy-loaded, issue #15) before the
+ * normal createImageBitmap path; see {@link convertHeicToPng}.
  */
 import type {
   DecoderDeps,
@@ -22,20 +26,78 @@ import { outputMime } from "../formats";
 import { applyExifOption } from "../exif";
 
 /**
+ * Lazily import heic2any once per worker and cache the resolved module.
+ *
+ * heic2any is a large dependency (~1.3MB bundled, including its libheif WASM);
+ * importing it dynamically inside the worker keeps it out of the main bundle so
+ * non-HEIC users never download it (PRD HEIC input; ADR-0001 browser-only). ESM
+ * already memoizes dynamic imports, but holding the promise at module scope
+ * makes the "fetched once, reused for every HEIC in a run" intent explicit and
+ * matches the lazy-import helper pattern used by the AI model loader.
+ */
+let heic2anyLoader: Promise<typeof import("heic2any")["default"]> | undefined;
+
+function loadHeic2any(): Promise<typeof import("heic2any")["default"]> {
+  if (!heic2anyLoader) {
+    heic2anyLoader = import("heic2any").then((m) => m.default);
+  }
+  return heic2anyLoader;
+}
+
+/**
+ * Convert a HEIC blob into a PNG blob via heic2any.
+ *
+ * Transcoding targets PNG (lossless) so the subsequent createImageBitmap decodes
+ * the full-fidelity frame, and the faithful/AI upscalers then operate on the
+ * real pixels, exactly as if the user had uploaded a PNG.
+ *
+ * Errors are surfaced honestly: a malformed or unconvertible HEIC throws a clear
+ * message rather than hanging or crashing the pipeline (PRD HEIC user story #7).
+ */
+async function convertHeicToPng(heicBlob: Blob): Promise<Blob> {
+  const heic2any = await loadHeic2any();
+  let result: Blob | Blob[];
+  try {
+    result = await heic2any({ blob: heicBlob, toType: "image/png" });
+  } catch (err) {
+    // heic2any rejects on malformed/unconvertible input. Wrap with an honest,
+    // user-facing message so the pipeline reports a clear error, not a stack.
+    throw new Error(
+      "This HEIC file could not be converted. It may be corrupted or an " +
+        "unsupported HEIC variant. Try a different file.",
+      { cause: err },
+    );
+  }
+  // heic2any returns a single blob for a still image, or an array when
+  // `multiple: true` is requested. We never request multiple, but guard the
+  // union so the decoder always receives exactly one image.
+  return Array.isArray(result) ? result[0] : result;
+}
+
+/**
  * Decode an encoded file into RGBA {@link ImageData} via createImageBitmap + a
- * Canvas readback. JPEG/PNG/WebP/AVIF are decoded natively (`decodeStrategy`
- * "native"); GIF is decoded to its first frame ("firstFrame") —
- * `createImageBitmap` yields the still first frame, which is what the v1
- * pipeline processes (per-frame enhancement is out of scope, PRD §Out of scope).
+ * Canvas readback.
+ *
+ * - JPEG/PNG/WebP/AVIF are decoded natively (`decodeStrategy` "native").
+ * - GIF is decoded to its first frame ("firstFrame") - createImageBitmap yields
+ *   the still first frame, which is what the v1 pipeline processes (per-frame
+ *   enhancement is out of scope, PRD "Out of scope").
+ * - HEIC has no browser-native decoder ("convert"); the seam first transcodes it
+ *   to a PNG blob via `heic2any` (lazy-loaded, see {@link convertHeicToPng}) and
+ *   then decodes that blob through the same native path (issue #15, PRD HEIC
+ *   input). The rest of the pipeline is unaware HEIC ever existed.
  */
 export const browserDecoder: DecoderDeps = {
   async decode(buffer, format): Promise<ImageData> {
-    // createImageBitmap handles all browser-native formats including GIF first
-    // frame and AVIF. The `format` arg drives the decodeStrategy policy above;
-    // the browser codec is format-agnostic at this layer.
-    void format;
-    const blob = new Blob([buffer]);
-    const bitmap = await createImageBitmap(blob);
+    // HEIC: convert to a PNG blob first, then decode the PNG normally. The rest
+    // of the pipeline only ever sees decoded pixels - it never branches on HEIC.
+    let decodable: Blob;
+    if (format === "heic") {
+      decodable = await convertHeicToPng(new Blob([buffer]));
+    } else {
+      decodable = new Blob([buffer]);
+    }
+    const bitmap = await createImageBitmap(decodable);
     try {
       const { canvas } = createCanvas(bitmap.width, bitmap.height);
       const ctx = get2dContext(canvas);
@@ -55,20 +117,20 @@ export const browserDecoder: DecoderDeps = {
 
 /**
  * Map a pipeline output format to a Canvas toBlob MIME type. The encoder only
- * ever receives the v1 output matrix (PNG / WebP / JPEG — AVIF and GIF are
- * input-only, see {@link outputMime}); this is a typed cast onto that helper.
+ * ever receives the v1 output matrix (PNG / WebP / JPEG - AVIF, GIF and HEIC
+ * are input-only, see {@link outputMime}); this is a typed cast onto that helper.
  */
 function mimeType(format: ImageFormat): string {
   return outputMime(format as "png" | "webp" | "jpeg");
 }
 
 /**
- * Quality argument for toBlob — only meaningful for lossy formats (issue #10).
+ * Quality argument for toBlob - only meaningful for lossy formats (issue #10).
  *
  * Faithful output is always lossless (the lossless promise), so this is only
  * reached for AI-mode lossy WebP or JPEG. A high default (0.92) keeps the
  * "enhance, then compress" result visually faithful while still shrinking the
- * file vs. the lossless path. JPEG and lossy WebP both consume it as a 0–1
+ * file vs. the lossless path. JPEG and lossy WebP both consume it as a 0-1
  * quality; PNG ignores it (inherently lossless).
  */
 const LOSSY_DEFAULT_QUALITY = 0.92;
@@ -138,7 +200,9 @@ async function canvasToBuffer(
  * the original bytes and splice the EXIF APP1 back onto the JPEG output.
  *
  * PNG/WebP/AVIF outputs carry no EXIF from Canvas and there is nothing to
- * re-attach; `applyExifOption` is a no-op for them.
+ * re-attach; `applyExifOption` is a no-op for them. A non-JPEG *source* (e.g.
+ * HEIC) also yields no JPEG APP1 EXIF to re-attach - `extractExifSegment` treats
+ * it as "no EXIF" rather than throwing (issue #15).
  */
 export function browserEncoderWithSource(source: ArrayBuffer | undefined): EncoderDeps {
   return {

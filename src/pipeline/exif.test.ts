@@ -123,6 +123,16 @@ describe("isExifApp1 / extractExifSegment", () => {
     const buf = buildJpeg([SOI, buildXmpApp1(), EOI]);
     expect(extractExifSegment(buf)).toBeUndefined();
   });
+
+  it("returns undefined for a non-JPEG source (HEIC, PNG, etc.) without throwing", () => {
+    // A HEIC source reaches applyExifOption when the output is JPEG; the segment
+    // parser must not throw on bytes that are not a JPEG. Treat as "no EXIF".
+    const heicish = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]).buffer;
+    expect(() => extractExifSegment(heicish)).not.toThrow();
+    expect(extractExifSegment(heicish)).toBeUndefined();
+    // An empty buffer is likewise harmless.
+    expect(extractExifSegment(new ArrayBuffer(0))).toBeUndefined();
+  });
 });
 
 describe("injectExifIntoJpeg", () => {

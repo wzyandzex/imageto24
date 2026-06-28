@@ -21,14 +21,22 @@ export interface ImageData {
   readonly data: Uint8ClampedArray;
 }
 
-/** Image formats the pipeline understands, for both decode and encode. */
-export type ImageFormat = "jpeg" | "png" | "webp" | "avif" | "gif";
+/**
+ * Image formats the pipeline understands, for both decode and encode.
+ *
+ * `heic` is **input-only**: the browser has no native HEIC decoder, so HEIC is
+ * converted to a PNG bitmap via `heic2any` inside the decoder seam before the
+ * rest of the pipeline ever sees it (issue #15, PRD §HEIC input). No browser-side
+ * HEIC encoder exists, so output is never HEIC (PRD §Out of scope).
+ */
+export type ImageFormat = "jpeg" | "png" | "webp" | "avif" | "gif" | "heic";
 
 /**
  * The subset of {@link ImageFormat} a user may select for *output* (issue #10).
- * AVIF and GIF are input-only — Canvas cannot reliably encode them in every
- * target browser. Defined as a type alias (not a literal re-declaration) so the
- * two stay in sync if the input set ever changes.
+ * AVIF, GIF, and HEIC are input-only — Canvas cannot reliably encode AVIF/GIF in
+ * every target browser, and no viable browser-side HEIC encoder exists. Defined
+ * as a type alias (not a literal re-declaration) so the two stay in sync if the
+ * input set ever changes.
  */
 export type OutputFormat = "png" | "webp" | "jpeg";
 

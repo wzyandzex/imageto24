@@ -244,7 +244,7 @@ function App() {
             <Upload className="size-8 text-muted-foreground" />
             <span className="text-lg font-medium">Drop an image here</span>
             <span className="text-sm text-muted-foreground">
-              or click to choose a file (JPEG, PNG, WebP, AVIF, GIF)
+              or click to choose a file (JPEG, PNG, WebP, AVIF, GIF, HEIC)
             </span>
             <input
               ref={inputRef}
@@ -890,8 +890,11 @@ interface OutputFormatControlProps {
  * *why* their choice is constrained rather than wondering where it went. PNG and
  * (under AI) WebP's lossless/lossy toggle remain fully usable.
  *
- * HEIC is explicitly out of scope for v1 (target v2); the notice below states
- * this so iOS users aren't surprised when their photos aren't accepted.
+ * HEIC input is now accepted (issue #15): HEIC files are converted to PNG in
+ * the browser via heic2any on first use, so iPhone users no longer need to
+ * convert first. Output is never HEIC (no viable browser-side encoder; users want
+ * PNG/JPEG/WebP anyway) — the notice below states this so the user understands
+ * why their HEIC comes back as another format.
  */
 function OutputFormatControl({
   mode,
@@ -964,11 +967,13 @@ function OutputFormatControl({
             : "Faithful output is always lossless — PNG or lossless WebP."
           : "AI mode supports all three formats."}
       </p>
-      {/* HEIC is out of scope for v1 (target v2). Stated clearly so iOS users
-          convert to JPEG first rather than being surprised by a rejection. */}
+      {/* HEIC is accepted as input (issue #15) but is never an output: there
+          is no viable browser-side HEIC encoder, and users want PNG/JPEG/WebP
+          anyway. Stated so iOS users understand why their HEIC returns as
+          another format. */}
       <p className="text-xs text-muted-foreground" data-testid="heic-notice">
-        HEIC/HEIF (Apple photos) isn't supported yet — convert to JPEG first.
-        Coming in a future release.
+        HEIC/HEIF (Apple photos) is accepted on upload and converted in your
+        browser — output is always PNG, WebP, or JPEG, never HEIC.
       </p>
     </div>
   );

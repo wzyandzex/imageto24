@@ -1,22 +1,23 @@
 // @vitest-environment jsdom
 //
-// Browser codec tests (issue #10) for the AVIF + GIF first-frame decode path.
+// Browser codec tests (issue #10, extended v2 HEIC #15) for the decode path.
 //
-// The codec is browser-bound (`createImageBitmap` + Canvas), so it normally
-// lives outside the pure-function seam. But the PRD acceptance criteria require
-// Vitest coverage of `decode` for AVIF and GIF first-frame fixtures. We reach
-// that coverage by stubbing the browser APIs (`createImageBitmap`,
-// `OffscreenCanvas`, `ImageData`) with deterministic fakes and asserting the
-// codec feeds bytes through `createImageBitmap` and reads pixels back — for AVIF
-// natively and for GIF with the first frame only. The pixel-level decode truth
-// is additionally exercised end-to-end by Playwright.
+// The codec is browser-bound (`createImageBitmap` + Canvas, plus `heic2any` for
+// HEIC), so it normally lives outside the pure-function seam. But the PRD
+// acceptance criteria require Vitest coverage of `decode` for AVIF, GIF
+// first-frame, and HEIC fixtures. We reach that coverage by stubbing the browser
+// APIs (`createImageBitmap`, `OffscreenCanvas`, `ImageData`) with deterministic
+// fakes and asserting the codec feeds bytes through `createImageBitmap` and
+// reads pixels back - for AVIF natively, for GIF with the first frame only, and
+// for HEIC via a heic2any -> PNG convert first. The pixel-level decode truth is
+// additionally exercised end-to-end by Playwright.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { browserDecoder } from "./canvasCodec";
 import { decodeStrategy } from "../formats";
 
 /**
  * A fake decoded frame: records that a Blob reached createImageBitmap and
- * surfaces a 1×1 RGBA pixel surface via the Canvas readback path. Lets us
+ * surfaces a 1x1 RGBA pixel surface via the Canvas readback path. Lets us
  * assert "the GIF bytes were handed to createImageBitmap once" without a real
  * image decoder. jsdom's Blob lacks arrayBuffer(), so we capture the blob and
  * compare by byte length + first byte rather than reading it back.
@@ -43,7 +44,7 @@ function stubBrowserDecode() {
     },
   );
 
-  // Canvas 2D context fake: drawImage is a no-op; getImageData returns a 1×1
+  // Canvas 2D context fake: drawImage is a no-op; getImageData returns a 1x1
   // RGBA pixel so the codec produces a valid ImageData.
   const fakeCtx = {
     drawImage: vi.fn(),
@@ -104,7 +105,7 @@ describe("browserDecoder — AVIF input (issue #10, AC)", () => {
     expect(calls[0].blobByteLength).toBe(64);
     // The bitmap was released after readback (no leak across batch items).
     expect(fakeBitmap.close).toHaveBeenCalledTimes(1);
-    // The pixel surface is 1×1 with the stubbed RGBA value.
+    // The pixel surface is 1x1 with the stubbed RGBA value.
     expect(imageData.width).toBe(1);
     expect(imageData.height).toBe(1);
     expect(Array.from(imageData.data)).toEqual([10, 20, 30, 255]);
@@ -144,5 +145,64 @@ describe("browserDecoder — GIF first-frame input (issue #10, AC)", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].blobByteLength).toBe(32);
+  });
+});
+
+// heic2any is a ~500KB dependency the decoder lazy-imports (issue #15). We stub
+// the module so Vitest never loads the real bytes; the test asserts the decoder
+// hands the HEIC blob to heic2any with toType "image/png", then decodes the
+// returned PNG via createImageBitmap like any other native format.
+vi.mock("heic2any", () => ({
+  default: vi.fn(async ({ toType }: { blob: Blob; toType?: string }) => {
+    heic2anyCalls.push({ toType: toType ?? "<default>" });
+    return new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" });
+  }),
+}));
+
+const heic2anyCalls: { toType: string }[] = [];
+
+describe("browserDecoder — HEIC input (issue #15, AC)", () => {
+  it("routes HEIC through the convert strategy", () => {
+    // HEIC has no native browser decoder; the decoder seam transcodes it first.
+    expect(decodeStrategy("heic")).toBe("convert");
+  });
+
+  it("converts HEIC to PNG via heic2any, then decodes via createImageBitmap", async () => {
+    const { calls, fakeBitmap } = stubBrowserDecode();
+    heic2anyCalls.length = 0;
+    const heicBytes = new ArrayBuffer(96);
+    new Uint8Array(heicBytes).fill(0x00);
+
+    const imageData = await browserDecoder.decode(heicBytes, "heic");
+
+    // heic2any was called once with a PNG target — the convert contract.
+    expect(heic2anyCalls).toHaveLength(1);
+    expect(heic2anyCalls[0].toType).toBe("image/png");
+    // The returned PNG blob reached createImageBitmap exactly once.
+    expect(calls).toHaveLength(1);
+    expect(fakeBitmap.close).toHaveBeenCalledTimes(1);
+    // The decoded pixels flow through the same Canvas readback as native formats.
+    expect(imageData.width).toBe(1);
+    expect(imageData.height).toBe(1);
+    expect(Array.from(imageData.data)).toEqual([10, 20, 30, 255]);
+  });
+
+  it("surfaces an honest error when heic2any rejects (malformed/unconvertible)", async () => {
+    // A malformed or unsupported HEIC must produce a clear error, not a crash or
+    // a hang (PRD HEIC user story #7). Stub heic2any to reject and assert the
+    // decoder wraps it with a user-facing message.
+    const heic2any = (await import("heic2any")).default as unknown as {
+      mockClear: () => void;
+      mockRejectedValueOnce: (v: unknown) => void;
+    };
+    heic2any.mockClear();
+    heic2any.mockRejectedValueOnce(new Error("libheif decode failed"));
+    stubBrowserDecode();
+
+    const badHeic = new ArrayBuffer(8);
+
+    await expect(browserDecoder.decode(badHeic, "heic")).rejects.toThrow(
+      /could not be converted/i,
+    );
   });
 });

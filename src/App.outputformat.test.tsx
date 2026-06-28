@@ -125,13 +125,15 @@ describe("output format selector — faithful lossless promise (issue #10 AC)", 
   });
 });
 
-describe("output format selector — HEIC out-of-scope notice (issue #10 AC)", () => {
-  it("clearly states HEIC is not supported in v1", async () => {
+describe("output format selector - HEIC input/output notice (issue #15)", () => {
+  it("states HEIC is accepted on input but never produced as output", async () => {
     await renderApp();
-    // The notice must call out HEIC and tell iOS users what to do — so an
-    // attempted HEIC upload is never a surprise rejection.
+    // HEIC is now an accepted input (converted in-browser); output stays PNG /
+    // WebP / JPEG. The notice must name HEIC and make the input-vs-output
+    // distinction clear so iOS users are not surprised by a re-encoded file.
     const notice = screen.getByTestId("heic-notice");
     expect(notice.textContent).toMatch(/HEIC/i);
-    expect(notice.textContent).toMatch(/convert/i);
+    expect(notice.textContent).toMatch(/accepted/i);
+    expect(notice.textContent).toMatch(/never HEIC/i);
   });
 });

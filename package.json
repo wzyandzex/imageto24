@@ -19,6 +19,7 @@
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "heic2any": "^0.0.4",
     "lucide-react": "^0.515.0",
     "onnxruntime-web": "^1.21.1",
     "react": "^19.1.0",
