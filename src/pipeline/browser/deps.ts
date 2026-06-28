@@ -9,7 +9,7 @@
 import { browserCapabilityDetector } from "./capability";
 import { browserDecoder } from "./canvasCodec";
 import { browserEncoderWithSource } from "./canvasCodec";
-import { faithfulUpscaler } from "./upscaler";
+import { aiUpscaler, faithfulUpscaler } from "./upscaler";
 import { loadRealEsrganModel } from "./modelLoader";
 import type { ModelLoaderDeps, PipelineDeps } from "../types";
 
@@ -35,7 +35,8 @@ export function browserPipelineDeps(sourceBytes: ArrayBuffer | undefined): Pipel
   return {
     decoder: browserDecoder,
     encoder: browserEncoderWithSource(sourceBytes),
-    upscaler: faithfulUpscaler,
+    faithfulUpscaler,
+    aiUpscaler,
     modelLoader: browserModelLoader,
     capability: browserCapabilityDetector,
   };

@@ -145,23 +145,39 @@ export interface ExactTargetSize {
 }
 
 /**
- * Runs the upscale. In faithful mode this is Lanczos interpolation
- * (deterministic, lossless); in AI mode it is ONNX model inference via WebGPU.
- * Both are environment-bound and arrive as injected implementations.
- *
- * When {@link UpscaleOptions.exactTargetSize} is provided, the upscaler performs
- * the integer-factor native upscale and then a final Lanczos resize to the exact
- * target, honouring the tier's long edge precisely (PRD §Resolution control).
+ * The faithful (Lanczos) upscaler seam. Does pure interpolation — no AI model,
+ * no mode dispatch (architecture review candidate #3 split this out of the
+ * former dispatcher). Each adapter owns exactly one mode's implementation.
  */
-export interface UpscalerDeps {
-  upscale(imageData: ImageData, options: UpscaleOptions): Promise<ImageData>;
+export interface FaithfulUpscalerDeps {
+  upscale(imageData: ImageData, options: FaithfulUpscaleOptions): Promise<ImageData>;
 }
 
-/** Options for {@link UpscalerDeps.upscale}. */
-export interface UpscaleOptions {
-  readonly mode: ProcessingMode;
+/** Options for {@link FaithfulUpscalerDeps.upscale}. */
+export interface FaithfulUpscaleOptions {
   readonly factor: UpscaleFactor;
-  readonly model?: AiModel;
+  /**
+   * When set, the upscaler performs the integer-factor native upscale and then
+   * a final Lanczos resize to the exact target, honouring the tier's long edge
+   * precisely (PRD §Resolution control). Absent for the explicit-factor path,
+   * where the native output already matches the goal.
+   */
+  readonly exactTargetSize?: ExactTargetSize;
+}
+
+/**
+ * The AI (Real-ESRGAN / ONNX Runtime) upscaler seam. Reconstructs detail via
+ * model inference — non-lossless by nature. Requires a loaded model; the
+ * orchestrator loads it lazily before calling.
+ */
+export interface AiUpscalerDeps {
+  upscale(imageData: ImageData, options: AiAdapterOptions): Promise<ImageData>;
+}
+
+/** Options for {@link AiUpscalerDeps.upscale}. The model is required. */
+export interface AiAdapterOptions {
+  readonly factor: UpscaleFactor;
+  readonly model: AiModel;
   /**
    * When set, the upscaler adjusts its native integer output to exactly these
    * dimensions (the tier target). Absent for the explicit-factor / no-residual
@@ -264,7 +280,8 @@ export interface ProcessImageResult {
 export interface PipelineDeps {
   readonly decoder: DecoderDeps;
   readonly encoder: EncoderDeps;
-  readonly upscaler: UpscalerDeps;
+  readonly faithfulUpscaler: FaithfulUpscalerDeps;
+  readonly aiUpscaler: AiUpscalerDeps;
   readonly modelLoader: ModelLoaderDeps;
   readonly capability: CapabilityDetector;
 }

@@ -126,12 +126,23 @@ export async function processImage(
     }
 
     // 5. Upscale.
-    output = await deps.upscaler.upscale(imageData, {
-      mode,
-      factor: factorResult.factor,
-      model,
-      exactTargetSize,
-    });
+    // 5. Upscale — one adapter per mode (architecture review candidate #3).
+    //    The orchestrator already knows `mode` (it gates model loading on it),
+    //    so dispatching here concentrates the decision where it already lives.
+    //    Each adapter's options carry only what that mode actually consumes:
+    //    faithful ignores the model entirely; ai requires it.
+    if (mode === "ai") {
+      output = await deps.aiUpscaler.upscale(imageData, {
+        factor: factorResult.factor,
+        model: model!,
+        exactTargetSize,
+      });
+    } else {
+      output = await deps.faithfulUpscaler.upscale(imageData, {
+        factor: factorResult.factor,
+        exactTargetSize,
+      });
+    }
   } else {
     // No valid upscale — factor is undefined; reflect that in the metadata.
     factorMeta = undefined;

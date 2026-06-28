@@ -30,8 +30,10 @@ export type {
   TargetSpec,
   UpscaleFactor,
   UpscaleFactorResult,
-  UpscaleOptions,
-  UpscalerDeps,
+  FaithfulUpscaleOptions,
+  FaithfulUpscalerDeps,
+  AiAdapterOptions,
+  AiUpscalerDeps,
 } from "./types";
 
 export type { CapabilityDecision } from "./capability";

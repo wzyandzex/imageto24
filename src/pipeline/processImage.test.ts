@@ -61,7 +61,8 @@ function scaleUp(src: ImageData, factor: number): ImageData {
 
 interface DepCallLog {
   decode: ImageFormat[];
-  upscale: { mode: string; factor?: number; exactTargetSize?: { width: number; height: number } }[];
+  faithful: { factor?: number; exactTargetSize?: { width: number; height: number } }[];
+  ai: { factor?: number; exactTargetSize?: { width: number; height: number } }[];
   encode: { format: ImageFormat; lossless: boolean; preserveExif: boolean }[];
   loadModel: ContentType[];
   capability: number;
@@ -80,7 +81,8 @@ function makeStubDeps(opts: {
 }): { deps: PipelineDeps; log: DepCallLog } {
   const log: DepCallLog = {
     decode: [],
-    upscale: [],
+    faithful: [],
+    ai: [],
     encode: [],
     loadModel: [],
     capability: 0,
@@ -109,19 +111,31 @@ function makeStubDeps(opts: {
         },
       ),
     },
-    upscaler: {
+    faithfulUpscaler: {
       upscale: vi.fn(
         async (
           image: ImageData,
-          o: { mode: string; factor?: number; exactTargetSize?: { width: number; height: number } },
+          o: { factor: number; exactTargetSize?: { width: number; height: number } },
         ) => {
-          log.upscale.push(o);
-          // Stand-in upscale: scale by the resolved factor, then honour an exact
-          // target size when the orchestrator requests a tier-precise landing.
+          log.faithful.push(o);
           if (o.exactTargetSize) {
             return imageData(o.exactTargetSize.width, o.exactTargetSize.height);
           }
-          return scaleUp(image, o.factor ?? 1);
+          return scaleUp(image, o.factor);
+        },
+      ),
+    },
+    aiUpscaler: {
+      upscale: vi.fn(
+        async (
+          image: ImageData,
+          o: { factor: number; model: AiModel; exactTargetSize?: { width: number; height: number } },
+        ) => {
+          log.ai.push(o);
+          if (o.exactTargetSize) {
+            return imageData(o.exactTargetSize.width, o.exactTargetSize.height);
+          }
+          return scaleUp(image, o.factor);
         },
       ),
     },
@@ -163,10 +177,10 @@ describe("processImage — orchestration flow", () => {
     expect(log.capability).toBe(1);
     // Decoded once with the input format.
     expect(log.decode).toEqual(["png"]);
-    // Upscaled once, faithful mode, with the resolved factor.
-    expect(log.upscale).toHaveLength(1);
-    expect(log.upscale[0].mode).toBe("faithful");
-    expect(log.upscale[0].factor).toBe(4);
+    // Upscaled once via the faithful adapter, with the resolved factor.
+    expect(log.faithful).toHaveLength(1);
+    expect(log.ai).toHaveLength(0);
+    expect(log.faithful[0].factor).toBe(4);
     // Encoded once with the requested output options.
     expect(log.encode).toEqual([
       { format: "png", lossless: true, preserveExif: true },
@@ -176,7 +190,7 @@ describe("processImage — orchestration flow", () => {
     // Meta reflects the faithful upscale landing precisely on the 4K tier
     // (native 4× of a 640-long-edge source is 2560, so a residual Lanczos
     // resize brings the output to the exact 3840 target — PRD default path).
-    expect(log.upscale[0].exactTargetSize).toEqual({ width: 3840, height: 2160 });
+    expect(log.faithful[0].exactTargetSize).toEqual({ width: 3840, height: 2160 });
     expect(result.meta).toEqual({
       mode: "faithful",
       factor: 4,
@@ -202,9 +216,9 @@ describe("processImage — orchestration flow", () => {
       },
     );
 
-    // AI mode ⇒ model loaded once, with the anime content type.
+    // AI mode ⇒ model loaded once, with the anime content type, AI upscaler called.
     expect(log.loadModel).toEqual(["anime"]);
-    expect(log.upscale[0].mode).toBe("ai");
+    expect(log.ai).toHaveLength(1);
     expect(result.meta.mode).toBe("ai");
     expect(result.meta.factor).toBe(4);
   });
@@ -310,7 +324,8 @@ describe("processImage — graceful degradation (ADR-0002)", () => {
 
     // AI was requested but the device can't run it ⇒ no model load, faithful path.
     expect(log.loadModel).toHaveLength(0);
-    expect(log.upscale[0].mode).toBe("faithful");
+    expect(log.faithful).toHaveLength(1);
+    expect(log.ai).toHaveLength(0);
     expect(result.meta.mode).toBe("faithful");
   });
 
@@ -332,7 +347,7 @@ describe("processImage — graceful degradation (ADR-0002)", () => {
 
     // WebGPU was present, but the memory gate refused AI before model load.
     expect(log.loadModel).toHaveLength(0);
-    expect(log.upscale[0].mode).toBe("faithful");
+    expect(log.faithful).toHaveLength(1);
     expect(result.meta.mode).toBe("faithful");
   });
 });
@@ -360,7 +375,8 @@ describe("processImage — boundary rule (target below source)", () => {
 
     // Decode + encode still run (caller gets a usable file), but no upscale.
     expect(log.decode).toHaveLength(1);
-    expect(log.upscale).toHaveLength(0);
+    expect(log.faithful).toHaveLength(0);
+    expect(log.ai).toHaveLength(0);
     expect(log.encode).toHaveLength(1);
     expect(result.meta.noUpscale).toBe(true);
     expect(result.meta.factor).toBeUndefined();
@@ -390,11 +406,10 @@ describe("processImage — resolution control variants (issue #8)", () => {
       },
     );
 
-    expect(log.upscale).toHaveLength(1);
-    expect(log.upscale[0].mode).toBe("faithful");
-    expect(log.upscale[0].factor).toBe(3);
+    expect(log.faithful).toHaveLength(1);
+    expect(log.faithful[0].factor).toBe(3);
     // No residual ⇒ no exact target — the native 3× output is the goal.
-    expect(log.upscale[0].exactTargetSize).toBeUndefined();
+    expect(log.faithful[0].exactTargetSize).toBeUndefined();
     expect(result.meta).toEqual({
       mode: "faithful",
       factor: 3,
@@ -424,11 +439,11 @@ describe("processImage — resolution control variants (issue #8)", () => {
       },
     );
 
-    expect(log.upscale).toHaveLength(1);
-    expect(log.upscale[0].factor).toBe(4);
+    expect(log.faithful).toHaveLength(1);
+    expect(log.faithful[0].factor).toBe(4);
     // The residual triggered an exact-target request, landing precisely on the
     // custom long edge with aspect ratio preserved.
-    expect(log.upscale[0].exactTargetSize).toEqual({
+    expect(log.faithful[0].exactTargetSize).toEqual({
       width: 3000,
       height: Math.round((360 * 3000) / 640),
     });
@@ -455,7 +470,8 @@ describe("processImage — resolution control variants (issue #8)", () => {
       },
     );
 
-    expect(log.upscale).toHaveLength(0);
+    expect(log.faithful).toHaveLength(0);
+    expect(log.ai).toHaveLength(0);
     expect(result.meta.noUpscale).toBe(true);
     expect(result.meta.factor).toBeUndefined();
   });
@@ -547,7 +563,7 @@ describe("processImage — output format resolution (issue #10)", () => {
       },
     );
 
-    expect(log.upscale[0].mode).toBe("faithful");
+    expect(log.faithful).toHaveLength(1);
     expect(log.encode).toEqual([
       { format: "webp", lossless: true, preserveExif: true },
     ]);
