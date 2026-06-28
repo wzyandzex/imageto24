@@ -19,9 +19,23 @@ export interface RunInWorkerInput {
   options: ProcessImageOptions;
 }
 
+/**
+ * A non-terminal progress message fired before a heavyweight decode. Today only
+ * HEIC triggers one — its decode is a `heic2any` transcode (a large, lazy-loaded
+ * dependency) that runs the libheif convert. Surfaced to the UI so the one-time
+ * wait has an honest indicator instead of a silent stall (PRD HEIC story #5).
+ */
+export type DecodePhase = "heic-converting";
+
+/** Worker decode-progress message (issue #17). */
+export interface DecodeProgress {
+  readonly phase: DecodePhase;
+}
+
 /** Messages the worker emits. Progress is non-terminal; result/error terminate. */
 type WorkerMessage =
   | { type: "progress"; progress: ModelLoadProgress }
+  | { type: "decode-progress"; phase: DecodePhase }
   | { type: "result"; ok: true; result: ProcessImageResult }
   | { type: "result"; ok: false; error: string };
 
@@ -32,6 +46,13 @@ export interface ProcessImageInWorkerOptions {
    * download. Never fires in faithful mode.
    */
   onModelProgress?: (p: ModelLoadProgress) => void;
+  /**
+   * Optional callback for heavyweight-decode progress (issue #17). Today only
+   * HEIC fires it — once, before the `heic2any` convert — so the UI can show
+   * that the one-time converter load is underway (PRD HEIC user story #5).
+   * Never fires for browser-native formats.
+   */
+  onDecodeProgress?: (p: DecodeProgress) => void;
 }
 
 /**
@@ -48,6 +69,10 @@ export function processImageInWorker(
       const { data } = e;
       if (data.type === "progress") {
         opts.onModelProgress?.(data.progress);
+        return;
+      }
+      if (data.type === "decode-progress") {
+        opts.onDecodeProgress?.({ phase: data.phase });
         return;
       }
       // data.type === "result" here. Narrow via ok before reading result/error

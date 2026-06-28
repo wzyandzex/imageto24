@@ -24,6 +24,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
+import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import {
   outputExtension,
   outputMime,
@@ -89,6 +90,13 @@ interface BatchViewState {
   progress: BatchProgress;
   urls: Map<string, string>;
   modelProgress: ModelLoadProgress | null;
+  /**
+   * HEIC decode-progress (issue #17). The worker fires a one-shot
+   * "heic-converting" message before each HEIC item's transcode, so the batch UI
+   * can show the one-time converter load is underway the same way the
+   * single-image path does (PRD HEIC story #5).
+   */
+  decodeProgress: DecodeProgress | null;
 }
 
 export function BatchPanel({ options }: BatchPanelProps) {
@@ -120,6 +128,7 @@ export function BatchPanel({ options }: BatchPanelProps) {
         progress: emptyProgress(rows),
         urls: new Map(),
         modelProgress: null,
+        decodeProgress: null,
       });
 
       const items: BatchItem[] = rows.map((r) => ({
@@ -159,6 +168,12 @@ export function BatchPanel({ options }: BatchPanelProps) {
             {
               onModelProgress: (p) =>
                 setState((s) => (s ? { ...s, modelProgress: p } : s)),
+              // Forward the HEIC-converting decode progress for batch items too
+              // (issue #17): the worker posts it before each HEIC transcode, so
+              // the batch UI shows the converter at work the same way the
+              // single-image path does (PRD HEIC story #5).
+              onDecodeProgress: (p) =>
+                setState((s) => (s ? { ...s, decodeProgress: p } : s)),
             },
           );
         },
@@ -176,14 +191,21 @@ export function BatchPanel({ options }: BatchPanelProps) {
                 urls.set(it.id, URL.createObjectURL(blob));
               }
             }
-            return { progress: p, urls, modelProgress: prev?.modelProgress ?? null };
+            return {
+              progress: p,
+              urls,
+              modelProgress: prev?.modelProgress ?? null,
+              decodeProgress: prev?.decodeProgress ?? null,
+            };
           });
         },
       );
 
       // Mark running false; keep the final snapshot + urls visible for download.
       setState((prev) =>
-        prev ? { ...prev, progress: final, modelProgress: null } : prev,
+        prev
+          ? { ...prev, progress: final, modelProgress: null, decodeProgress: null }
+          : prev,
       );
       setRunning(false);
     },
@@ -297,6 +319,13 @@ export function BatchPanel({ options }: BatchPanelProps) {
               <p className="text-xs text-muted-foreground">
                 Downloading the AI Enhance model for first use — one-time, cached
                 afterwards.
+              </p>
+            )}
+            {running && state?.decodeProgress?.phase === "heic-converting" && (
+              <p data-testid="batch-heic-converting-notice" className="text-xs text-muted-foreground">
+                Converting a HEIC photo in the browser. The converter loads once
+                on first use and is cached afterwards; the convert runs on every
+                HEIC in the batch.
               </p>
             )}
           </div>

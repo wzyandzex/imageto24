@@ -6,6 +6,7 @@ import { PrivacyDialog } from "@/components/PrivacyDialog";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { SITE_LINKS } from "@/lib/siteLinks";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
+import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import { useRunReadiness } from "@/pipeline/useRunReadiness";
 import { targetLabel } from "@/pipeline/runReadiness";
 import {
@@ -76,6 +77,10 @@ function App() {
   const [result, setResult] = useState<ProcessImageResult | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelLoadProgress | null>(null);
+  // HEIC first-use indicator (PRD user story #5): the worker fires a one-shot
+  // "converting HEIC" decode-progress message before the heic2any transcode, so
+  // the UI can show the one-time converter load is underway. Cleared on settle.
+  const [decodeProgress, setDecodeProgress] = useState<DecodeProgress | null>(null);
   const [dragOver, setDragOver] = useState(false);
   // Privacy & about dialog (issue #11). Opened from the header chip and the
   // footer; the dialog is the verifiable-privacy surface.
@@ -116,6 +121,15 @@ function App() {
   const triggerDisabled = !source || readiness.triggerDisabled;
 
   // Load a chosen file: read bytes, probe dimensions via an Image, stash state.
+  //
+  // HEIC is the one format the main thread cannot decode: there is no browser-
+  // native HEIC decoder, so `new Image()` fails and a real decode only happens
+  // in the worker (via heic2any, issue #15). For HEIC we therefore skip the
+  // dimension probe and stash the source with a 0×0 placeholder — the
+  // orchestrator computes the real factor from the decoded pixels, and
+  // `resolveRunReadiness` already tolerates a 0×0 source (tier/factor targets
+  // still resolve a factor; the boundary notice won't spuriously fire). The
+  // preview swaps in a placeholder card instead of a broken <img>.
   const loadFile = useCallback(async (file: File) => {
     setError(null);
     setResult(null);
@@ -128,6 +142,12 @@ function App() {
       return;
     }
     const buffer = await file.arrayBuffer();
+    if (format === "heic") {
+      // Browser can't render HEIC — defer dimensions to the worker decode.
+      setSource({ file, buffer, format, url: "", width: 0, height: 0 });
+      setStatus("idle");
+      return;
+    }
     const url = URL.createObjectURL(file);
     const dims = await readDimensions(url);
     setSource({ file, buffer, format, url, width: dims.width, height: dims.height });
@@ -153,6 +173,7 @@ function App() {
     setError(null);
     setResult(null);
     setModelProgress(null);
+    setDecodeProgress(null);
     try {
       // Read fresh bytes each run; the worker transfers (detaches) the buffer.
       const buffer = await source.file.arrayBuffer();
@@ -170,7 +191,9 @@ function App() {
             mode: effectiveMode,
             // The derived resolution goal (tier / factor / custom long edge).
             // `computeUpscaleFactor` inside the orchestrator handles all three —
-            // no orchestrator changes were needed for issue #8.
+            // no orchestrator changes were needed for issue #8. For HEIC the
+            // source dims are unknown until decode (browser can't read HEIC),
+            // so the orchestrator computes the factor from the decoded pixels.
             target,
             outputFormat: effectiveOutput.format,
             lossless: effectiveOutput.lossless,
@@ -188,10 +211,14 @@ function App() {
           // Forward the lazy model-download progress (AI mode only) so the UI can
           // show an honest first-use indicator for the ~65MB download (issue #6).
           onModelProgress: setModelProgress,
+          // Forward the HEIC-converting decode progress so the UI can show the
+          // one-time heic2any load is underway (issue #17, PRD story #5).
+          onDecodeProgress: setDecodeProgress,
         },
       );
       setResult(res);
       setModelProgress(null);
+      setDecodeProgress(null);
       if (resultUrl) URL.revokeObjectURL(resultUrl);
       const blob = new Blob([res.buffer], { type: outputMime(effectiveOutput.format) });
       const url = URL.createObjectURL(blob);
@@ -201,6 +228,7 @@ function App() {
       setError(err instanceof Error ? err.message : String(err));
       setStatus("error");
       setModelProgress(null);
+      setDecodeProgress(null);
     }
   }, [source, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput]);
 
@@ -286,18 +314,38 @@ function App() {
 
         {source && (
           <section className="flex flex-col gap-8">
-            {/* Preview + original dimensions */}
+            {/* Preview + original dimensions. HEIC can't be rendered by the
+                browser — there's no native decoder — so we swap the <img> for a
+                placeholder card and state the dimensions are read on run; the
+                worker decodes via heic2any (issue #15) and the real factor is
+                computed from the decoded pixels. */}
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-              <img
-                src={source.url}
-                alt="Source preview"
-                data-testid="source-preview"
-                className="max-h-64 rounded-lg border border-border object-contain"
-              />
+              {source.format === "heic" ? (
+                <div
+                  data-testid="heic-source-placeholder"
+                  className="flex max-h-64 w-full max-w-xs flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-input p-6 text-center sm:w-64"
+                >
+                  <ImageIcon className="size-8 text-muted-foreground" />
+                  <span className="text-sm font-medium">HEIC photo</span>
+                  <span className="text-xs text-muted-foreground">
+                    Converted in your browser on upscale. Your browser can't
+                    preview HEIC, so the preview appears after the run.
+                  </span>
+                </div>
+              ) : (
+                <img
+                  src={source.url}
+                  alt="Source preview"
+                  data-testid="source-preview"
+                  className="max-h-64 rounded-lg border border-border object-contain"
+                />
+              )}
               <div className="flex flex-col gap-2 text-sm">
                 <p className="font-medium">{source.file.name}</p>
                 <p data-testid="original-dimensions" className="text-muted-foreground">
-                  Original: {source.width} × {source.height}px
+                  {source.format === "heic"
+                    ? "Original: dimensions read after conversion (HEIC isn't browser-decodable)."
+                    : `Original: ${source.width} × ${source.height}px`}
                 </p>
                 <Button variant="ghost" size="sm" className="w-fit" onClick={() => replaceRef.current?.click()}>
                   Choose a different image
@@ -339,12 +387,18 @@ function App() {
                 ) : triggerDisabled ? (
                   <>Target not larger than source</>
                 ) : (
-                  <>Upscale to {targetLabel}</>
+                  <>Upscale to {label}</>
                 )}
               </Button>
               {status === "processing" && (
                 <>
-                  {modelProgress?.phase === "downloading" ? (
+                  {decodeProgress?.phase === "heic-converting" ? (
+                    <p data-testid="heic-converting-notice" className="text-sm text-muted-foreground">
+                      Converting your HEIC photo in the browser. The converter
+                      loads once on first use and is cached afterwards; the
+                      convert itself runs on every HEIC.
+                    </p>
+                  ) : modelProgress?.phase === "downloading" ? (
                     <p data-testid="progress" className="text-sm text-muted-foreground">
                       {modelProgress.total
                         ? `Downloading the AI Enhance model for first use — ${formatBytes(modelProgress.received ?? 0)} of ${formatBytes(modelProgress.total)} (one-time, ~65MB; cached for next time).`
