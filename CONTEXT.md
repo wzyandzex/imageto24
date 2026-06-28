@@ -70,3 +70,21 @@ _Avoid_: Run config, run state (conflicts with runtime state like status/result)
 The mode a run would actually target — the user's selection, downgraded to faithful when AI is unavailable. A derived value, never a mutation of the user's selection. The user's `mode` is preserved; `effectiveMode` is what the UI displays as the active run target and what the run consumes.
 _Avoid_: Actual mode, forced mode, resolved mode (ambiguous with the user's choice)
 
+### Animated images
+
+**Animated image**:
+An image file that contains a sequence of frames played in sequence to produce motion. In v2, only animated GIF is processed as an animated image; other multi-frame containers (animated WebP, APNG) are treated as stills (first frame only), like v1.
+_Avoid_: Video, animation (too generic), movie
+
+**Frame**:
+A single still image within an animated image, with its own pixels, delay, and disposal method. A GIF is a sequence of frames; processing an animated image means processing each frame and reassembling them.
+_Avoid_: Image (collides with the whole file), picture, layer
+
+**Per-frame enhancement**:
+Processing every frame of an animated image through the pipeline independently, then re-encoding the results into a new animated container. Offered for faithful mode; deliberately not offered for AI mode in v2 (too slow in-browser).
+_Avoid_: Full enhancement, complete enhancement
+
+**First-frame-only**:
+The fallback path for animated images in AI mode: only the first frame is enhanced; the remaining frames are carried through unchanged. Surfaced to the user with an honest explanation rather than silently applied.
+_Avoid_: Partial enhancement, single-frame (ambiguous with still images)
+
