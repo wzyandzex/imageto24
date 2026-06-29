@@ -28,3 +28,30 @@ The ONNX-converted general model served from R2 is derived from Real-ESRGAN and
 inherits its BSD 3-Clause license. Attribution is surfaced in-app on the AI
 Enhance option (model name + license); the full license text and source links
 above live in this file, shipped with the source distribution.
+
+## gifuct-js
+
+- License: MIT License
+- Used: animated-GIF decoder (issue #18). Parses a GIF and decompresses each
+  frame into per-frame pixel data for the faithful per-frame upscale path.
+  Lazy-loaded inside the worker-bound codec so non-animated users never download
+  it.
+- Source: https://github.com/matt-way/gifuct-js
+- Full text: https://github.com/matt-way/gifuct-js/blob/master/LICENSE
+
+## gifenc
+
+- License: MIT License
+- Used: animated-GIF encoder (issue #18). Re-encodes the upscaled frames into a
+  playable animated GIF (256-colour per-frame quantization, transparency + timing
+  preserved). Lazy-loaded inside the worker-bound codec.
+- Source: https://github.com/mattdesl/gifenc
+- Full text: https://github.com/mattdesl/gifenc/blob/master/LICENSE.md
+
+## heic2any
+
+- License: MIT License
+- Used: HEIC/HEIF decoder (issue #15). Converts iPhone HEIC photos to PNG in the
+  browser via the libheif WASM build, lazy-loaded so only HEIC users download it.
+- Source: https://github.com/alexcorvi/heic2any
+- Full text: https://github.com/alexcorvi/heic2any/blob/master/LICENSE.txt

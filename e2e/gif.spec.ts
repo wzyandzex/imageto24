@@ -3,22 +3,25 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readPngDims } from "./fixtures/png";
 import { makeGif } from "./fixtures/gif";
+import { parseGIF, decompressFrames } from "gifuct-js";
 
 /**
- * E2E for the animated-GIF detection + routing line (issue #16): upload an
- * animated GIF → see the detected frame count → see the honest "treated as a
- * still for now" notice → run the upscale (the placeholder first-frame path,
- * which delegates to processImage) → download a valid PNG at the expected 4K
- * dimensions.
+ * E2E for the animated-GIF line (issue #16 detection/routing + issue #18
+ * per-frame decode → faithful upscale → gifenc re-encode).
  *
- * This is the test the PRD testing decisions call out: "A Playwright test
- * covers: upload an animated GIF, see the frame count, see the 'treated as
- * still for now' path." The fixture is a real, browser-decodable animated GIF
- * generated at runtime (3 frames, 1×1 each) — `detectAnimation` runs on its
- * real bytes, the browser decodes its first frame, and the faithful upscale
- * runs to completion through the `processAnimated` placeholder.
+ * The #16-only slice (a placeholder first-frame fallback that returned a PNG) is
+ * replaced by the real animated path: upload an animated GIF → see the detected
+ * frame count + the "animation preserved" notice → upscale → see per-frame
+ * progress advance to N/N → download a *playable animated GIF* → re-decode it
+ * via gifuct-js and assert the frame count, dimensions, and per-frame timing all
+ * survived the round-trip (PRD stories #8–#12).
+ *
+ * The fixture is a real, browser-decodable 3-frame GIF generated at runtime
+ * (1×1 frames). `detectAnimation` runs on its real bytes on upload; the worker's
+ * `processAnimated` decodes every frame, upscales each via the faithful Lanczos
+ * path, and re-encodes via gifenc. The downloaded GIF is then re-decoded here
+ * (gifuct-js again) to verify the round-trip end-to-end.
  *
  * The source is 1×1 (square); a 4K faithful upscale (long edge 3840) lands at
  * 3840×3840, aspect ratio preserved.
@@ -34,20 +37,20 @@ test.beforeAll(() => {
   writeFileSync(STILL_GIF, makeGif(1));
 });
 
-test("animated GIF: detected frame count + 'treated as still for now' notice", async ({ page }) => {
+test("animated GIF: detected frame count + 'animation preserved' notice", async ({ page }) => {
   await page.goto("/");
 
   // Upload the real animated GIF via the hidden single-image file input.
   const fileInput = page.locator('input[type="file"]').first();
   await fileInput.setInputFiles(ANIMATED_GIF);
 
-  // The animated notice renders: frame count (3) + the honest "still for now"
-  // message. Both are the user-facing contract for the GIF line (PRD stories
-  // #16/#17/#18). The frame count reads "3 frames".
+  // The animated notice renders: frame count (3) + the honest "animation
+  // preserved" message (issue #18 — the placeholder "treated as a still for
+  // now" notice is gone; the GIF now stays animated).
   await expect(page.getByTestId("animated-gif-notice")).toBeVisible();
   await expect(page.getByTestId("animated-frame-count")).toContainText(/3 frames?/);
   await expect(page.getByTestId("animated-gif-notice")).toContainText(
-    /still image|first frame/i,
+    /animation is preserved/i,
   );
 
   // The detection-only notices (animated WebP / APNG) must NOT show for a GIF.
@@ -55,9 +58,9 @@ test("animated GIF: detected frame count + 'treated as still for now' notice", a
   await expect(page.getByTestId("apng-notice")).toHaveCount(0);
 });
 
-test("animated GIF: upscale runs via the processAnimated (placeholder) path → valid 4K PNG", async ({ page }) => {
+test("animated GIF: faithful per-frame upscale → playable 4K GIF (frames + dims + timing preserved)", async ({ page }) => {
   const dir = mkdtempSync(join(tmpdir(), "imageto24-gif-e2e-"));
-  const outPath = join(dir, "upscaled.png");
+  const outPath = join(dir, "upscaled.gif");
 
   await page.goto("/");
 
@@ -70,14 +73,16 @@ test("animated GIF: upscale runs via the processAnimated (placeholder) path → 
   // Faithful is the default mode; select 4K.
   await page.getByTestId("tier-4K").click();
 
-  // Trigger the upscale. The worker dispatches to processAnimated (the
-  // placeholder), which delegates to processImage on the first frame. The
-  // fixture is 1×1 (square), so a 4K faithful upscale (long edge 3840) lands at
-  // 3840×3840 — aspect ratio preserved.
+  // Trigger the upscale. processAnimated decodes every frame → faithful
+  // Lanczos per frame → gifenc re-encode. The fixture is 1×1 (square), so a 4K
+  // faithful upscale (long edge 3840) lands at 3840×3840.
   await page.getByTestId("upscale-button").click();
 
+  // Per-frame progress should advance to 3/3 (PRD story #10). It may fire and
+  // settle quickly on the 1×1 fixture, so wait for the result dimensions
+  // (the terminal signal) rather than a specific frame-progress value.
   await expect(page.getByTestId("result-dimensions")).toContainText("3840 × 3840", {
-    timeout: 180_000,
+    timeout: 240_000,
   });
 
   // Download the result and capture it.
@@ -86,16 +91,26 @@ test("animated GIF: upscale runs via the processAnimated (placeholder) path → 
   const download = await downloadPromise;
   await download.saveAs(outPath);
 
-  // The downloaded file is a valid PNG at the expected 4K dimensions — the
-  // first-frame-fallback placeholder produces a real, usable still output.
+  // The downloaded file is a GIF (GIF89a magic), NOT a PNG — #18 re-encodes a
+  // playable animated GIF rather than the #16 placeholder's single still.
   const downloaded = readFileSync(outPath);
-  expect(downloaded[0]).toBe(0x89);
-  expect(downloaded[1]).toBe(0x50); // 'P'
-  expect(downloaded[2]).toBe(0x4e); // 'N'
-  expect(downloaded[3]).toBe(0x47); // 'G'
-  const dims = readPngDims(downloaded);
-  expect(dims.width).toBe(3840);
-  expect(dims.height).toBe(3840);
+  expect(downloaded[0]).toBe(0x47); // 'G'
+  expect(downloaded[1]).toBe(0x49); // 'I'
+  expect(downloaded[2]).toBe(0x46); // 'F'
+
+  // Re-decode the downloaded GIF via gifuct-js and assert the round-trip:
+  //   - frame count preserved (3 → 3, PRD story #8/9)
+  //   - dimensions upscaled to the 4K canvas (3840×3840)
+  //   - per-frame timing preserved (100ms delay carried through, story #11)
+  const reparsed = decompressFrames(parseGIF(downloaded.buffer), true);
+  expect(reparsed.length).toBe(3); // frame count survived
+  const first = reparsed[0];
+  expect(first.dims.width).toBe(3840);
+  expect(first.dims.height).toBe(3840);
+  for (const f of reparsed) {
+    // gifuct-js reports delay already in milliseconds; the fixture used 100ms.
+    expect(f.delay).toBe(100);
+  }
 });
 
 test("single-frame GIF: no animated notice, routes to the still path", async ({ page }) => {

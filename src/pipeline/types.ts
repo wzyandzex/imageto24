@@ -146,6 +146,61 @@ export interface EncoderDeps {
   ): Promise<ArrayBuffer>;
 }
 
+/**
+ * One decoded frame of an animated GIF (issue #18). The {@link imageData} is the
+ * full-canvas composited RGBA — disposal/offset/transparency already applied by
+ * the decoder (gifuct-js) — so each frame is an independent still the upscaler
+ * can run on unmodified. {@link delay} and {@link disposalType} are carried
+ * through verbatim so the re-encode preserves timing and disposal behaviour
+ * (PRD stories #11/#12).
+ */
+export interface DecodedGifFrame {
+  readonly imageData: ImageData;
+  /** Frame delay in milliseconds, as gifuct-js reports it (gce.delay × 10). */
+  readonly delay: number;
+  /** Original GIF disposal method (0/1/2/3), carried through for re-encode. */
+  readonly disposalType: number;
+}
+
+/**
+ * Decodes an animated GIF into its per-frame full-canvas {@link ImageData}.
+ * Environment-bound (gifuct-js, lazy-loaded); always injected. The pure
+ * orchestrator never touches gifuct-js directly — it sees only frames.
+ */
+export interface AnimatedGifDecoderDeps {
+  decodeGif(buffer: ArrayBuffer): Promise<readonly DecodedGifFrame[]>;
+}
+
+/** Options for {@link AnimatedGifEncoderDeps.encodeGif}. */
+export interface GifEncodeOptions {
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * Re-encodes a sequence of enhanced frames into a playable animated GIF.
+ * Environment-bound (gifenc, lazy-loaded); always injected. The encoder owns
+ * the 256-colour quantization (an inherent GIF limit, ADR-0006) and per-frame
+ * timing + disposal; the orchestrator hands it the upscaled frames + their
+ * original delays and disposal methods.
+ */
+export interface AnimatedGifEncoderDeps {
+  encodeGif(
+    frames: ReadonlyArray<{
+      imageData: ImageData;
+      delay: number;
+      /**
+       * GIF disposal method (0/1/2/3), carried through from the decode so the
+       * re-encoded GIF composites identically on playback (PRD story #12). A
+       * full-canvas composited frame can usually leave disposal at the default,
+       * but passing it through keeps the round-trip faithful.
+       */
+      disposalType: number;
+    }>,
+    options: GifEncodeOptions,
+  ): Promise<ArrayBuffer>;
+}
+
 /** Exact target dimensions, used to land an upscale precisely on a tier's long edge. */
 export interface ExactTargetSize {
   readonly width: number;
@@ -212,6 +267,20 @@ export interface ModelLoadProgress {
 }
 
 /**
+ * Per-frame progress for the animated-GIF path (issue #18, PRD story #10). Fires
+ * once after each frame completes its upscale, so the UI can show the GIF
+ * advancing frame-by-frame. 1-based `current` against `total` (the frame count
+ * from the decode); the sequence is in frame order.
+ */
+export interface FrameProgress {
+  readonly current: number;
+  readonly total: number;
+}
+
+/** Per-frame progress callback threaded through `processAnimated`. */
+export type FrameProgressCb = (p: FrameProgress) => void;
+
+/**
  * Progress callback threaded through the lazy model load. Optional; pure
  * orchestration tests pass nothing and the loader still completes.
  */
@@ -273,6 +342,12 @@ export interface ProcessImageMeta {
   readonly width: number;
   readonly height: number;
   readonly noUpscale: boolean;
+  /**
+   * Frame count, set only by the animated-GIF path ({@link processAnimated}).
+   * Absent for a still run (`processImage`). Surfaced so the UI can confirm the
+   * output animation has the same frame count as the input (PRD story #17).
+   */
+  readonly frameCount?: number;
 }
 
 /** The orchestrator's result. */
@@ -292,6 +367,14 @@ export interface PipelineDeps {
   readonly aiUpscaler: AiUpscalerDeps;
   readonly modelLoader: ModelLoaderDeps;
   readonly capability: CapabilityDetector;
+  /**
+   * Animated-GIF codec (issue #18). Only the {@link processAnimated} path
+   * consumes these; `processImage` never touches them. They are optional on the
+   * bundle so the still path's tests can omit them — `processAnimated` throws
+   * loudly if they are absent.
+   */
+  readonly animatedDecoder?: AnimatedGifDecoderDeps;
+  readonly animatedEncoder?: AnimatedGifEncoderDeps;
 }
 
 /**

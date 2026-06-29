@@ -11,6 +11,10 @@ import { browserDecoder } from "./canvasCodec";
 import { browserEncoderWithSource } from "./canvasCodec";
 import { aiUpscaler, faithfulUpscaler } from "./upscaler";
 import { loadRealEsrganModel } from "./modelLoader";
+import {
+  browserAnimatedGifDecoder,
+  browserAnimatedGifEncoder,
+} from "./animatedGifCodec";
 import type { ModelLoaderDeps, PipelineDeps } from "../types";
 
 /**
@@ -39,5 +43,9 @@ export function browserPipelineDeps(sourceBytes: ArrayBuffer | undefined): Pipel
     aiUpscaler,
     modelLoader: browserModelLoader,
     capability: browserCapabilityDetector,
+    // Animated-GIF codec (issue #18): lazy-loaded inside the codec, so these
+    // references are cheap until an animated GIF is actually processed.
+    animatedDecoder: browserAnimatedGifDecoder,
+    animatedEncoder: browserAnimatedGifEncoder,
   };
 }
