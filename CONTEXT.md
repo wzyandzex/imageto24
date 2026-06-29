@@ -73,7 +73,7 @@ _Avoid_: Actual mode, forced mode, resolved mode (ambiguous with the user's choi
 ### Animated images
 
 **Animated image**:
-An image file that contains a sequence of frames played in sequence to produce motion. In v2, only animated GIF is processed as an animated image; other multi-frame containers (animated WebP, APNG) are treated as stills (first frame only), like v1.
+An image file that contains a sequence of frames played in sequence to produce motion. v3 extends per-frame processing to animated WebP; animated GIF was handled in v2. APNG is supported as an *output* container only (APNG inputs are still treated as stills, first frame only).
 _Avoid_: Video, animation (too generic), movie
 
 **Frame**:
@@ -87,4 +87,18 @@ _Avoid_: Full enhancement, complete enhancement
 **First-frame-only**:
 The fallback path for animated images in AI mode: only the first frame is enhanced; the remaining frames are carried through unchanged. Surfaced to the user with an honest explanation rather than silently applied.
 _Avoid_: Partial enhancement, single-frame (ambiguous with still images)
+
+### Animated output (v3)
+
+**Animated output format**:
+The container a processed animated image is written to. Determined by device capability, not user choice: APNG when WebCodecs is available (true-colour, transparency), GIF when it is not (256-colour, the universal fallback). The user's still-output-format selection is irrelevant for animated inputs.
+_Avoid_: Output container, animated export
+
+**Animated codec**:
+The format-agnostic seam behind animated encode/decode. `decodeAnimated(buffer, format)` returns per-frame `ImageData` regardless of whether the source is GIF or WebP; `encodeAnimated(frames, dims)` produces an animated container. Each format's specifics (256-colour quantization for GIF, WebCodecs decode for WebP) live inside the adapter implementations, not in the orchestration.
+_Avoid_: GIF codec, WebP codec (format-specific; use these only when naming a specific adapter)
+
+**Colour fidelity**:
+Whether the animated output preserves the source's full colour depth. APNG output is true-colour (full fidelity); GIF output is quantized to 256 colours per frame (reduced fidelity, an inherent GIF limit). The WebCodecs-or-degrade decision exists to maximize colour fidelity where the device allows it.
+_Avoid_: Colour quality, colour accuracy, high colour
 
