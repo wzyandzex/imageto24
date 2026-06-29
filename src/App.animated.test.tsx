@@ -238,7 +238,7 @@ beforeEach(() => {
 });
 
 describe("animated-GIF upload UI (issue #16)", () => {
-  it("shows the frame count + 'treated as a still for now' notice for a multi-frame GIF", async () => {
+  it("shows the frame count + 'animation preserved' notice for a multi-frame GIF", async () => {
     await renderApp();
     // A real 3-frame GIF: detectAnimation runs on the actual bytes.
     await upload(buildGif(3), "clip.gif", "image/gif");
@@ -246,9 +246,11 @@ describe("animated-GIF upload UI (issue #16)", () => {
     // Frame count surfaces (PRD story #17).
     const frameCount = screen.getByTestId("animated-frame-count");
     expect(frameCount.textContent).toMatch(/3 frames?/);
-    // Honest "still for now" path (the placeholder; #18 lands the per-frame path).
+    // Honest "animation preserved" messaging (issue #18: processAnimated now
+    // upscales every frame and re-encodes a playable GIF, replacing the old
+    // "treated as a still for now" placeholder notice).
     expect(screen.getByTestId("animated-gif-notice").textContent).toMatch(
-      /still image|first frame/i,
+      /animation is preserved/i,
     );
     // The animated-WebP / APNG notices must NOT show for a GIF.
     expect(screen.queryByTestId("animated-webp-notice")).toBeNull();
@@ -313,10 +315,11 @@ describe("animated-GIF upload UI (issue #16)", () => {
     expect(captured!.animated).toBeFalsy();
   });
 
-  it("runs the upscale to completion for an animated GIF (placeholder still path)", async () => {
-    // The placeholder delegates to processImage; the run must settle to "done"
-    // with a usable result (no crash, no hang) — the routing wiring is the
-    // deliverable, the per-frame logic comes next.
+  it("runs the upscale to completion for an animated GIF (animated route, mocked result)", async () => {
+    // The worker is mocked to return a fixed faithful result, so this asserts
+    // the routing wiring settles to "done" with a usable result — the real
+    // per-frame decode/encode is exercised end-to-end by the Playwright GIF
+    // suite (and the orchestration contract by processAnimated.test.ts).
     await renderApp();
     await upload(buildGif(4), "clip.gif", "image/gif");
 

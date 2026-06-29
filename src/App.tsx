@@ -18,6 +18,7 @@ import {
   outputMime,
   type CapabilityDecision,
   type ContentType,
+  type FrameProgress,
   type ImageFormat,
   type ModelLoadProgress,
   type OutputFormat,
@@ -89,6 +90,10 @@ function App() {
   // "converting HEIC" decode-progress message before the heic2any transcode, so
   // the UI can show the one-time converter load is underway. Cleared on settle.
   const [decodeProgress, setDecodeProgress] = useState<DecodeProgress | null>(null);
+  // Per-frame progress for the animated-GIF path (issue #18, PRD story #10). The
+  // worker fires `frame-progress` after each frame's upscale, in frame order, so
+  // the UI can show the GIF advancing frame-by-frame instead of a blind spinner.
+  const [frameProgress, setFrameProgress] = useState<FrameProgress | null>(null);
   const [dragOver, setDragOver] = useState(false);
   // Privacy & about dialog (issue #11). Opened from the header chip and the
   // footer; the dialog is the verifiable-privacy surface.
@@ -122,7 +127,16 @@ function App() {
     },
   );
   const { effectiveMode, aiDecision, target, factorResult, effectiveOutput } = readiness;
-  const effectiveExt = outputExtension(effectiveOutput.format);
+  // Animated-GIF output is always GIF (issue #18): processAnimated re-encodes a
+  // playable animated GIF via gifenc, so the user's PNG/WebP/JPEG choice is
+  // irrelevant for an animated input — a 4K animated PNG makes no sense and GIF
+  // is the only animated output container v2 ships. Override the extension/mime
+  // and surface this honestly in the notice below so the choice isn't silently
+  // ignored. (Animated WebP/APNG stay on the still path, so this only applies
+  // to a multi-frame GIF — `source.animation.isAnimated`.)
+  const isAnimatedGif = !!source?.animation.isAnimated;
+  const effectiveExt = isAnimatedGif ? "gif" : outputExtension(effectiveOutput.format);
+  const effectiveMime = isAnimatedGif ? "image/gif" : outputMime(effectiveOutput.format);
   const label = targetLabel(target);
   // triggerDisabled from readiness + the separate "no source" guard the UI
   // still owns (no run makes sense before an image is loaded).
@@ -188,6 +202,7 @@ function App() {
     setResult(null);
     setModelProgress(null);
     setDecodeProgress(null);
+    setFrameProgress(null);
     try {
       // Read fresh bytes each run; the worker transfers (detaches) the buffer.
       const buffer = await source.file.arrayBuffer();
@@ -232,13 +247,18 @@ function App() {
           // Forward the HEIC-converting decode progress so the UI can show the
           // one-time heic2any load is underway (issue #17, PRD story #5).
           onDecodeProgress: setDecodeProgress,
+          // Forward per-frame progress for the animated-GIF path so the UI shows
+          // the GIF advancing frame-by-frame (issue #18, PRD story #10). The
+          // still path never fires it.
+          onFrameProgress: setFrameProgress,
         },
       );
       setResult(res);
       setModelProgress(null);
       setDecodeProgress(null);
+      setFrameProgress(null);
       if (resultUrl) URL.revokeObjectURL(resultUrl);
-      const blob = new Blob([res.buffer], { type: outputMime(effectiveOutput.format) });
+      const blob = new Blob([res.buffer], { type: effectiveMime });
       const url = URL.createObjectURL(blob);
       setResultUrl(url);
       setStatus("done");
@@ -247,8 +267,9 @@ function App() {
       setStatus("error");
       setModelProgress(null);
       setDecodeProgress(null);
+      setFrameProgress(null);
     }
-  }, [source, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput]);
+  }, [source, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput, effectiveMime]);
 
   const downloadName = source
     ? source.file.name.replace(/\.[^.]+$/, "") + `_${label}_upscaled.${effectiveExt}`
@@ -365,11 +386,14 @@ function App() {
                     ? "Original: dimensions read after conversion (HEIC isn't browser-decodable)."
                     : `Original: ${source.width} × ${source.height}px`}
                 </p>
-                {/* Animated-image notices (issue #16). Three honest paths, never a
-                    silent surprise:
-                      - multi-frame GIF → frame count + "treated as a still for
-                        now" (the placeholder first-frame fallback; #18 lands the
-                        real per-frame path).
+                {/* Animated-image notices (issue #16 detection; issue #18 makes
+                    the GIF path real). Three honest paths, never a silent surprise:
+                      - multi-frame GIF → frame count + "every frame upscaled and
+                        re-encoded as a playable GIF" (processAnimated, #18).
+                        ADR-0006 honest messaging: faithful = every frame; AI =
+                        first frame only, rest faithful. Output is always GIF
+                        (the only animated output v2 ships), stated so the user's
+                        PNG/WebP/JPEG choice isn't silently ignored.
                       - animated WebP / APNG → detected but treated as a still in
                         v2, with full support planned (PRD §Out of scope).
                     A single-frame GIF or a plain still shows nothing here. */}
@@ -383,8 +407,11 @@ function App() {
                       detected.
                     </p>
                     <p className="text-xs text-muted-foreground">
-                      For now this is upscaled as a still (first frame only);
-                      full per-frame animated-GIF upscaling is coming.
+                      {effectiveMode === "ai"
+                        ? "AI mode enhances the first frame and interpolates the rest (faithful); the animation is preserved."
+                        : "Faithful mode upscales every frame; the animation is preserved."}{" "}
+                      Output is re-encoded as a playable animated GIF (a 256-colour
+                      container, so fine detail may band).
                     </p>
                   </div>
                 )}
@@ -452,6 +479,12 @@ function App() {
                       Converting your HEIC photo in the browser. The converter
                       loads once on first use and is cached afterwards; the
                       convert itself runs on every HEIC.
+                    </p>
+                  ) : frameProgress ? (
+                    <p data-testid="frame-progress" className="text-sm text-muted-foreground">
+                      Upscaling frame {frameProgress.current} of{" "}
+                      {frameProgress.total} — the animation is preserved frame by
+                      frame.
                     </p>
                   ) : modelProgress?.phase === "downloading" ? (
                     <p data-testid="progress" className="text-sm text-muted-foreground">

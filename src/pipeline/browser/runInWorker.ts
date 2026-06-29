@@ -7,6 +7,7 @@
  */
 import ProcessWorker from "./processWorker?worker";
 import type {
+  FrameProgress,
   ImageFormat,
   ModelLoadProgress,
   ProcessImageOptions,
@@ -45,6 +46,7 @@ export interface DecodeProgress {
 type WorkerMessage =
   | { type: "progress"; progress: ModelLoadProgress }
   | { type: "decode-progress"; phase: DecodePhase }
+  | { type: "frame-progress"; current: number; total: number }
   | { type: "result"; ok: true; result: ProcessImageResult }
   | { type: "result"; ok: false; error: string };
 
@@ -62,6 +64,13 @@ export interface ProcessImageInWorkerOptions {
    * Never fires for browser-native formats.
    */
   onDecodeProgress?: (p: DecodeProgress) => void;
+  /**
+   * Optional per-frame callback for the animated-GIF path (issue #18, PRD
+   * story #10). Fires once after each frame's upscale, in frame order. Never
+   * fires on the still path. Lets the UI show the GIF advancing frame-by-frame
+   * instead of a single indeterminate spinner.
+   */
+  onFrameProgress?: (p: FrameProgress) => void;
 }
 
 /**
@@ -82,6 +91,10 @@ export function processImageInWorker(
       }
       if (data.type === "decode-progress") {
         opts.onDecodeProgress?.({ phase: data.phase });
+        return;
+      }
+      if (data.type === "frame-progress") {
+        opts.onFrameProgress?.({ current: data.current, total: data.total });
         return;
       }
       // data.type === "result" here. Narrow via ok before reading result/error

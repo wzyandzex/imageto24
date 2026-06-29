@@ -12,6 +12,7 @@ export type {
   ContentType,
   DecoderDeps,
   DecodedImage,
+  DecodedGifFrame,
   DeviceCapability,
   EncodeOptions,
   EncoderDeps,
@@ -20,6 +21,8 @@ export type {
   ModelLoaderDeps,
   ModelLoadProgress,
   ModelLoadProgressCb,
+  FrameProgress,
+  FrameProgressCb,
   OutputFormat,
   PipelineDeps,
   ProcessImageMeta,
@@ -34,6 +37,9 @@ export type {
   FaithfulUpscalerDeps,
   AiAdapterOptions,
   AiUpscalerDeps,
+  AnimatedGifDecoderDeps,
+  AnimatedGifEncoderDeps,
+  GifEncodeOptions,
 } from "./types";
 
 export type { CapabilityDecision } from "./capability";
@@ -85,10 +91,11 @@ export {
 
 export { processImage } from "./processImage";
 
-// Animated-image detection + orchestration (issue #16, GIF line foundation).
-// `detectAnimation` is the pure header scan the UI runs on upload to decide
-// routing; `processAnimated` is the animated counterpart to `processImage`
-// (first-frame placeholder now, per-frame decode → re-encode in #18).
+// Animated-image detection + orchestration (issue #16 detection/routing, issue
+// #18 per-frame decode → upscale → re-encode). `detectAnimation` is the pure
+// header scan the UI runs on upload to pick the run path; `processAnimated` is
+// the animated counterpart to `processImage` — gifuct-js decode → per-frame
+// upscale (faithful: every frame; AI: first frame per ADR-0006) → gifenc re-encode.
 export {
   detectAnimation,
   type AnimationScan,

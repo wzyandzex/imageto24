@@ -149,14 +149,17 @@ self.onmessage = async (event: MessageEvent<{
     // `processAnimated` orchestrator; everything else (stills, single-frame
     // GIFs, animated WebP/APNG treated as stills) stays on `processImage`. The
     // two orchestrators share the PipelineDeps seam, so the worker boundary is
-    // the only place this branch exists. (#18 replaces processAnimated's body
-    // with per-frame decode → re-encode; this dispatch is already wired.)
+    // the only place this branch exists. #18's processAnimated decodes every
+    // frame → upscales → re-encodes via gifenc; the per-frame progress it emits
+    // is forwarded as `frame-progress` so the UI shows the GIF advancing.
     const run = animated
       ? processAnimated(
           deps,
           { buffer: source, format },
           options,
           (p: ModelLoadProgress) => post({ type: "progress", progress: p }),
+          ({ current, total }) =>
+            post({ type: "frame-progress", current, total }),
         )
       : processImage(
           deps,
