@@ -85,6 +85,16 @@ export {
 
 export { processImage } from "./processImage";
 
+// Animated-image detection + orchestration (issue #16, GIF line foundation).
+// `detectAnimation` is the pure header scan the UI runs on upload to decide
+// routing; `processAnimated` is the animated counterpart to `processImage`
+// (first-frame placeholder now, per-frame decode → re-encode in #18).
+export {
+  detectAnimation,
+  type AnimationScan,
+} from "./animatedDetect";
+export { processAnimated } from "./processAnimated";
+
 // Format matrix (issue #10): the pure policy above the browser codecs. The input
 // codec (AVIF + GIF first-frame) is browser-native; these helpers decide decode
 // strategy and resolve output format per the faithful lossless promise.

@@ -17,6 +17,15 @@ export interface RunInWorkerInput {
   source: ArrayBuffer;
   format: ImageFormat;
   options: ProcessImageOptions;
+  /**
+   * Animated-routing flag (issue #16). When true the worker dispatches to
+   * `processAnimated` (the GIF line's sibling orchestrator) instead of
+   * `processImage`. The UI sets this from `detectAnimation`'s `isAnimated` on
+   * upload — the routing decision is UI-level (PRD "two entry points, one
+   * router"), carried to the worker as a flag so a single worker entry serves
+   * both paths. False/absent ⇒ the still path (`processImage`).
+   */
+  animated?: boolean;
 }
 
 /**

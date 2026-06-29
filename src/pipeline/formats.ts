@@ -45,7 +45,11 @@ export type DecodeStrategy = "native" | "firstFrame" | "convert";
 export function decodeStrategy(format: ImageFormat): DecodeStrategy {
   switch (format) {
     case "gif":
-      // GIF: process the first frame only; animation is out of scope for v1.
+      // GIF: the browser codec decodes only the first frame (v1 behaviour, still
+      // the path processImage takes for a still). The animated-GIF line (issue
+      // #16 routing + #18's per-frame decode via gifuct-js) reaches the frames
+      // through `processAnimated`, not this codec — so the decode strategy here
+      // stays firstFrame regardless of whether the GIF is animated.
       return "firstFrame";
     case "heic":
       // HEIC: no native browser decoder. The decoder seam converts it to a PNG

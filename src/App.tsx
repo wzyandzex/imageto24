@@ -8,6 +8,7 @@ import { SITE_LINKS } from "@/lib/siteLinks";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
 import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import { useRunReadiness } from "@/pipeline/useRunReadiness";
+import { detectAnimation, type AnimationScan } from "@/pipeline";
 import { targetLabel } from "@/pipeline/runReadiness";
 import {
   OUTPUT_FORMATS,
@@ -46,6 +47,13 @@ interface SourceImage {
   url: string;
   width: number;
   height: number;
+  /**
+   * The animated-image scan (issue #16). Run cheaply on upload over the file's
+   * header — never a decode. Drives routing: `isAnimated` ⇒ `processAnimated`;
+   * everything else ⇒ `processImage`. Also carries the detection-only flags
+   * (`animatedWebp` / `apng`) for the honest "treated as a still in v2" notices.
+   */
+  animation: AnimationScan;
 }
 
 const TIERS: ResolutionTier[] = ["1080p", "2K", "4K"];
@@ -142,15 +150,21 @@ function App() {
       return;
     }
     const buffer = await file.arrayBuffer();
+    // Animated-image detection (issue #16): a cheap header scan — no decode —
+    // that decides routing. The result drives the run path (processImage vs
+    // processAnimated) and the UI notices (frame count, "treated as a still in
+    // v2" for animated WebP/APNG). Runs for every format; non-GIFs return a
+    // still-shaped scan immediately so the cost is just the magic-byte check.
+    const animation = detectAnimation(buffer, format);
     if (format === "heic") {
       // Browser can't render HEIC — defer dimensions to the worker decode.
-      setSource({ file, buffer, format, url: "", width: 0, height: 0 });
+      setSource({ file, buffer, format, url: "", width: 0, height: 0, animation });
       setStatus("idle");
       return;
     }
     const url = URL.createObjectURL(file);
     const dims = await readDimensions(url);
-    setSource({ file, buffer, format, url, width: dims.width, height: dims.height });
+    setSource({ file, buffer, format, url, width: dims.width, height: dims.height, animation });
     setStatus("idle");
   }, [resultUrl]);
 
@@ -181,6 +195,10 @@ function App() {
         {
           source: buffer,
           format: source.format,
+          // Routing flag (issue #16): a multi-frame GIF dispatches to
+          // `processAnimated` in the worker; everything else stays on the still
+          // path. The detection ran on upload; here we just forward the decision.
+          animated: source.animation.isAnimated,
           options: {
             // The effective mode — the user's selection downgraded to faithful
             // when AI is unavailable (readiness.effectiveMode). The old code
@@ -347,6 +365,43 @@ function App() {
                     ? "Original: dimensions read after conversion (HEIC isn't browser-decodable)."
                     : `Original: ${source.width} × ${source.height}px`}
                 </p>
+                {/* Animated-image notices (issue #16). Three honest paths, never a
+                    silent surprise:
+                      - multi-frame GIF → frame count + "treated as a still for
+                        now" (the placeholder first-frame fallback; #18 lands the
+                        real per-frame path).
+                      - animated WebP / APNG → detected but treated as a still in
+                        v2, with full support planned (PRD §Out of scope).
+                    A single-frame GIF or a plain still shows nothing here. */}
+                {source.animation.isAnimated && (
+                  <div className="flex flex-col gap-1" data-testid="animated-gif-notice">
+                    <p className="text-muted-foreground">
+                      Animated GIF —{" "}
+                      <span data-testid="animated-frame-count">
+                        {source.animation.frameCount} frames
+                      </span>{" "}
+                      detected.
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      For now this is upscaled as a still (first frame only);
+                      full per-frame animated-GIF upscaling is coming.
+                    </p>
+                  </div>
+                )}
+                {!source.animation.isAnimated && source.animation.animatedWebp && (
+                  <p data-testid="animated-webp-notice" className="text-xs text-muted-foreground">
+                    This is an animated WebP. v2 treats it as a still (first
+                    frame only); full animated-WebP support is planned for a
+                    future release.
+                  </p>
+                )}
+                {!source.animation.isAnimated && source.animation.apng && (
+                  <p data-testid="apng-notice" className="text-xs text-muted-foreground">
+                    This is an animated PNG (APNG). v2 treats it as a still
+                    (first frame only); full APNG support is planned for a
+                    future release.
+                  </p>
+                )}
                 <Button variant="ghost" size="sm" className="w-fit" onClick={() => replaceRef.current?.click()}>
                   Choose a different image
                 </Button>
