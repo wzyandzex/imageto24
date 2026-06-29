@@ -147,57 +147,59 @@ export interface EncoderDeps {
 }
 
 /**
- * One decoded frame of an animated GIF (issue #18). The {@link imageData} is the
- * full-canvas composited RGBA — disposal/offset/transparency already applied by
- * the decoder (gifuct-js) — so each frame is an independent still the upscaler
- * can run on unmodified. {@link delay} and {@link disposalType} are carried
- * through verbatim so the re-encode preserves timing and disposal behaviour
- * (PRD stories #11/#12).
+ * One decoded frame of an animated image (issue #18, v3 generalization). The
+ * {@link imageData} is the full-canvas composited RGBA — disposal/offset/
+ * transparency already applied by the decoder — so each frame is an independent
+ * still the upscaler can run on unmodified. {@link delay} and
+ * {@link disposalType} are carried through verbatim so the re-encode preserves
+ * timing and disposal behaviour (PRD stories #11/#12).
  */
-export interface DecodedGifFrame {
+export interface DecodedAnimatedFrame {
   readonly imageData: ImageData;
-  /** Frame delay in milliseconds, as gifuct-js reports it (gce.delay × 10). */
+  /** Frame delay in milliseconds, as the decoder reports it. */
   readonly delay: number;
-  /** Original GIF disposal method (0/1/2/3), carried through for re-encode. */
+  /** Original disposal method (0/1/2/3 for GIF), carried through for re-encode. */
   readonly disposalType: number;
 }
 
 /**
- * Decodes an animated GIF into its per-frame full-canvas {@link ImageData}.
- * Environment-bound (gifuct-js, lazy-loaded); always injected. The pure
- * orchestrator never touches gifuct-js directly — it sees only frames.
+ * Decodes an animated image into its per-frame full-canvas {@link ImageData}.
+ * Environment-bound (gifuct-js for GIF in v2, WebCodecs for WebP in v3,
+ * lazy-loaded); always injected. The pure orchestrator never touches a codec
+ * directly — it sees only frames (v3 generalization, issue #24).
  */
-export interface AnimatedGifDecoderDeps {
-  decodeGif(buffer: ArrayBuffer): Promise<readonly DecodedGifFrame[]>;
+export interface AnimatedDecoderDeps {
+  decodeAnimated(buffer: ArrayBuffer): Promise<readonly DecodedAnimatedFrame[]>;
 }
 
-/** Options for {@link AnimatedGifEncoderDeps.encodeGif}. */
-export interface GifEncodeOptions {
+/** Options for {@link AnimatedEncoderDeps.encodeAnimated}. */
+export interface AnimatedEncodeOptions {
   readonly width: number;
   readonly height: number;
 }
 
 /**
- * Re-encodes a sequence of enhanced frames into a playable animated GIF.
- * Environment-bound (gifenc, lazy-loaded); always injected. The encoder owns
- * the 256-colour quantization (an inherent GIF limit, ADR-0006) and per-frame
+ * Re-encodes a sequence of enhanced frames into a playable animated container.
+ * Environment-bound (gifenc for GIF in v2, UPNG.js for APNG in v3,
+ * lazy-loaded); always injected. The encoder owns the format-specific
+ * quantization (256-colour for GIF per ADR-0006; none for APNG) and per-frame
  * timing + disposal; the orchestrator hands it the upscaled frames + their
- * original delays and disposal methods.
+ * original delays and disposal methods (v3 generalization, issue #24).
  */
-export interface AnimatedGifEncoderDeps {
-  encodeGif(
+export interface AnimatedEncoderDeps {
+  encodeAnimated(
     frames: ReadonlyArray<{
       imageData: ImageData;
       delay: number;
       /**
-       * GIF disposal method (0/1/2/3), carried through from the decode so the
-       * re-encoded GIF composites identically on playback (PRD story #12). A
-       * full-canvas composited frame can usually leave disposal at the default,
+       * Disposal method (0/1/2/3 for GIF), carried through from the decode so the
+       * re-encoded container composites identically on playback (PRD story #12).
+       * A full-canvas composited frame can usually leave disposal at the default,
        * but passing it through keeps the round-trip faithful.
        */
       disposalType: number;
     }>,
-    options: GifEncodeOptions,
+    options: AnimatedEncodeOptions,
   ): Promise<ArrayBuffer>;
 }
 
@@ -368,13 +370,14 @@ export interface PipelineDeps {
   readonly modelLoader: ModelLoaderDeps;
   readonly capability: CapabilityDetector;
   /**
-   * Animated-GIF codec (issue #18). Only the {@link processAnimated} path
-   * consumes these; `processImage` never touches them. They are optional on the
-   * bundle so the still path's tests can omit them — `processAnimated` throws
-   * loudly if they are absent.
+   * Animated-image codec (issues #18/#24). Only the {@link processAnimated}
+   * path consumes these; `processImage` never touches them. They are optional on
+   * the bundle so the still path's tests can omit them — `processAnimated`
+   * throws loudly if they are absent. Format-specific (GIF/WebP/APNG); the
+   * generalization in #24 made them format-agnostic interfaces.
    */
-  readonly animatedDecoder?: AnimatedGifDecoderDeps;
-  readonly animatedEncoder?: AnimatedGifEncoderDeps;
+  readonly animatedDecoder?: AnimatedDecoderDeps;
+  readonly animatedEncoder?: AnimatedEncoderDeps;
 }
 
 /**

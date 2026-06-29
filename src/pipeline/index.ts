@@ -12,7 +12,7 @@ export type {
   ContentType,
   DecoderDeps,
   DecodedImage,
-  DecodedGifFrame,
+  DecodedAnimatedFrame,
   DeviceCapability,
   EncodeOptions,
   EncoderDeps,
@@ -37,9 +37,9 @@ export type {
   FaithfulUpscalerDeps,
   AiAdapterOptions,
   AiUpscalerDeps,
-  AnimatedGifDecoderDeps,
-  AnimatedGifEncoderDeps,
-  GifEncodeOptions,
+  AnimatedDecoderDeps,
+  AnimatedEncoderDeps,
+  AnimatedEncodeOptions,
 } from "./types";
 
 export type { CapabilityDecision } from "./capability";
