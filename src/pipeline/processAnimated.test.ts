@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import { processAnimated } from "./processAnimated";
 import type {
   ContentType,
-  DecodedGifFrame,
+  DecodedAnimatedFrame,
   ImageData,
   PipelineDeps,
 } from "./types";
@@ -35,7 +35,7 @@ function decodedFrames(
   w = 640,
   h = 360,
   delay = 100,
-): DecodedGifFrame[] {
+): DecodedAnimatedFrame[] {
   return Array.from({ length: n }, (_, i) => ({
     imageData: frameImage(w, h, 20 * (i + 1)),
     delay,
@@ -53,7 +53,7 @@ interface DepsSpies {
 
 /** Fully-stubbed PipelineDeps. Upscalers scale dims so frame order is
  *  distinguishable by the colour that landed in the encoder. */
-function makeStubDeps(frames: DecodedGifFrame[]): { deps: PipelineDeps; spies: DepsSpies } {
+function makeStubDeps(frames: DecodedAnimatedFrame[]): { deps: PipelineDeps; spies: DepsSpies } {
   const faithful = vi.fn(async (image: ImageData, o: { factor: number }) => {
     // Scale by factor so the output dims are observable; colour carried through
     // so a test can tell which frame the encoder received.
@@ -82,8 +82,8 @@ function makeStubDeps(frames: DecodedGifFrame[]): { deps: PipelineDeps; spies: D
         memBudget: 8_000_000_000,
       })),
     },
-    animatedDecoder: { decodeGif: decoder },
-    animatedEncoder: { encodeGif: encoder },
+    animatedDecoder: { decodeAnimated: decoder },
+    animatedEncoder: { encodeAnimated: encoder },
   };
   return { deps, spies: { faithful, ai, decoder, encoder } };
 }

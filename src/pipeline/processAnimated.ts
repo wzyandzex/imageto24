@@ -73,7 +73,7 @@ export async function processAnimated(
   }
 
   // 1. Decode — gifuct-js composited into full-canvas ImageData frames.
-  const frames = await deps.animatedDecoder.decodeGif(file.buffer);
+  const frames = await deps.animatedDecoder.decodeAnimated(file.buffer);
   if (frames.length === 0) {
     throw new Error("Animated GIF contained no decodable frames");
   }
@@ -200,7 +200,7 @@ export async function processAnimated(
   }
 
   // 4. Encode — gifenc re-assembles the frames into a playable animated GIF.
-  const buffer = await deps.animatedEncoder.encodeGif(
+  const buffer = await deps.animatedEncoder.encodeAnimated(
     enhanced,
     { width: outWidth, height: outHeight },
   );

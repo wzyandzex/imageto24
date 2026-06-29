@@ -1,7 +1,7 @@
 /**
  * Environment-bound animated-GIF codec (issue #18) — the browser-side
  * implementations of {@link AnimatedGifDecoderDeps} and
- * {@link AnimatedGifEncoderDeps}.
+ * {@link AnimatedEncoderDeps}.
  *
  * Both libraries are lazy-`import()`ed inside their functions, so a user who
  * never uploads an animated GIF never downloads gifuct-js (~30KB) or gifenc
@@ -13,9 +13,9 @@
  * to assert frame count, dimensions, and timing (PRD stories #8–#12).
  */
 import type {
-  AnimatedGifDecoderDeps,
-  AnimatedGifEncoderDeps,
-  DecodedGifFrame,
+  AnimatedDecoderDeps,
+  AnimatedEncoderDeps,
+  DecodedAnimatedFrame,
   ImageData,
 } from "../types";
 
@@ -42,8 +42,8 @@ import type {
  * sets alpha=0 for the transparent palette index when `buildImagePatches` is
  * true), so the composited frame carries the transparent regions forward.
  */
-export const browserAnimatedGifDecoder: AnimatedGifDecoderDeps = {
-  async decodeGif(buffer: ArrayBuffer): Promise<DecodedGifFrame[]> {
+export const browserAnimatedGifDecoder: AnimatedDecoderDeps = {
+  async decodeAnimated(buffer: ArrayBuffer): Promise<DecodedAnimatedFrame[]> {
     // Lazy-load so the codec never reaches a non-animated user's bundle.
     const { parseGIF, decompressFrames } = await import("gifuct-js");
 
@@ -63,7 +63,7 @@ export const browserAnimatedGifDecoder: AnimatedGifDecoderDeps = {
     // state before the *previous* frame was drawn.
     let previousSnapshot: Uint8ClampedArray | undefined;
 
-    const decoded: DecodedGifFrame[] = [];
+    const decoded: DecodedAnimatedFrame[] = [];
     for (const frame of frames) {
       const { left, top, width: fw, height: fh } = frame.dims;
 
@@ -160,8 +160,8 @@ function clearRect(
  * banding on photographic content. That's the documented trade of GIF's
  * universal playback; no workaround in v2.
  */
-export const browserAnimatedGifEncoder: AnimatedGifEncoderDeps = {
-  async encodeGif(
+export const browserAnimatedGifEncoder: AnimatedEncoderDeps = {
+  async encodeAnimated(
     frames: ReadonlyArray<{
       imageData: ImageData;
       delay: number;
