@@ -11,10 +11,7 @@ import { browserDecoder } from "./canvasCodec";
 import { browserEncoderWithSource } from "./canvasCodec";
 import { aiUpscaler, faithfulUpscaler } from "./upscaler";
 import { loadRealEsrganModel } from "./modelLoader";
-import {
-  browserAnimatedGifDecoder,
-  browserAnimatedGifEncoder,
-} from "./animatedGifCodec";
+import { resolveAnimatedCodecPair } from "./animatedCodecPair";
 import type { ModelLoaderDeps, PipelineDeps } from "../types";
 
 /**
@@ -43,9 +40,21 @@ export function browserPipelineDeps(sourceBytes: ArrayBuffer | undefined): Pipel
     aiUpscaler,
     modelLoader: browserModelLoader,
     capability: browserCapabilityDetector,
-    // Animated-GIF codec (issue #18): lazy-loaded inside the codec, so these
-    // references are cheap until an animated GIF is actually processed.
-    animatedDecoder: browserAnimatedGifDecoder,
-    animatedEncoder: browserAnimatedGifEncoder,
+    // Animated codec pair (v3 #25): detected per-call from WebCodecs availability.
+    // ADR-0007 — the device determines the output format, not the UI. WebCodecs
+    // (ImageDecoder) ⇒ the high-colour APNG path (v3-3/v3-4 plug in here); absent
+    // ⇒ the GIF fallback. Both resolve to the existing GIF codec until v3-3/v3-4
+    // land, so nothing breaks in the meantime.
+    ...resolveAnimatedCodecPair({ webCodecs: hasWebCodecs() }),
   };
+}
+
+/**
+ * Detect WebCodecs animated-image support on this call (no module-level cache,
+ * per v3 grilling decision #6). `ImageDecoder` is the WebCodecs entry point for
+ * decoding animated containers frame-by-frame; its presence is the capability
+ * gate for the true-colour APNG output path.
+ */
+function hasWebCodecs(): boolean {
+  return typeof ImageDecoder !== "undefined";
 }
