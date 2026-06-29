@@ -41,6 +41,9 @@ build/
 /test-results/
 /playwright-report/
 /playwright/.cache/
+# Runtime-generated GIF fixtures (built by e2e/fixtures/gif.ts at test time,
+# like the PNG fixtures — never committed binaries).
+/e2e/fixtures/*.gif
 
 # ---- Cloudflare ----
 .wrangler/

@@ -25,7 +25,7 @@
  */
 /// <reference lib="webworker" />
 import { browserPipelineDeps } from "@/pipeline/browser/deps";
-import { processImage } from "@/pipeline";
+import { processAnimated, processImage } from "@/pipeline";
 import type {
   ImageFormat,
   ModelLoadProgress,
@@ -126,8 +126,9 @@ self.onmessage = async (event: MessageEvent<{
   source: ArrayBuffer;
   format: ImageFormat;
   options: ProcessImageOptions;
+  animated?: boolean;
 }>) => {
-  const { source, format, options } = event.data;
+  const { source, format, options, animated } = event.data;
   const post = (msg: unknown, transfer?: Transferable[]) =>
     (self as unknown as Worker).postMessage(msg, transfer ?? []);
   try {
@@ -143,12 +144,27 @@ self.onmessage = async (event: MessageEvent<{
       post({ type: "decode-progress", phase: "heic-converting" });
     }
     const deps = browserPipelineDeps(source);
-    const result = await processImage(
-      deps,
-      { buffer: source, format },
-      options,
-      (p: ModelLoadProgress) => post({ type: "progress", progress: p }),
-    );
+    // Animated routing (issue #16): the UI ran `detectAnimation` on upload and
+    // set `animated` when the file is a multi-frame GIF. Dispatch to the sibling
+    // `processAnimated` orchestrator; everything else (stills, single-frame
+    // GIFs, animated WebP/APNG treated as stills) stays on `processImage`. The
+    // two orchestrators share the PipelineDeps seam, so the worker boundary is
+    // the only place this branch exists. (#18 replaces processAnimated's body
+    // with per-frame decode → re-encode; this dispatch is already wired.)
+    const run = animated
+      ? processAnimated(
+          deps,
+          { buffer: source, format },
+          options,
+          (p: ModelLoadProgress) => post({ type: "progress", progress: p }),
+        )
+      : processImage(
+          deps,
+          { buffer: source, format },
+          options,
+          (p: ModelLoadProgress) => post({ type: "progress", progress: p }),
+        );
+    const result = await run;
     // Transfer the underlying buffer to avoid a copy.
     post({ type: "result", ok: true, result }, [result.buffer]);
   } catch (err) {
