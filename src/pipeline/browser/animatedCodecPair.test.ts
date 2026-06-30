@@ -1,15 +1,20 @@
 // @vitest-environment node
 //
-// Pure codec-pair selection tests (issues #25 / #26).
+// Pure codec-pair selection tests (issues #25 / #26 / #27).
 //
 // `resolveAnimatedCodecPair` returns the animated decoder/encoder pair. These
 // tests run under Vitest in plain Node — no browser — and assert the selection
 // logic, not the codec implementations themselves (the WebCodecs/wasm surfaces
-// are exercised in `animatedWebpCodec.test.ts`).
+// are exercised in `animatedWebpCodec.test.ts`; the APNG encode contract in
+// `animatedApngCodec.test.ts`).
 import { describe, expect, it } from "vitest";
 import { resolveAnimatedCodecPair } from "./animatedCodecPair";
+import {
+  browserAnimatedApngEncoder,
+} from "./animatedApngCodec";
+import { browserAnimatedGifEncoder } from "./animatedGifCodec";
 
-describe("resolveAnimatedCodecPair (issues #25 / #26)", () => {
+describe("resolveAnimatedCodecPair (issues #25 / #26 / #27)", () => {
   it("returns a usable { decoder, encoder } for either capability", () => {
     // Both branches must yield a defined pair — no undefined seam.
     const withWebCodecs = resolveAnimatedCodecPair({ webCodecs: true });
@@ -25,14 +30,28 @@ describe("resolveAnimatedCodecPair (issues #25 / #26)", () => {
     // #26: the decoder routes by input format (WebP → WebCodecs/wasm adapter,
     // GIF → gifuct-js) rather than by capability. The WebP adapter performs its
     // own `typeof ImageDecoder` gate, so the same dispatcher serves every device.
-    // The capability differentiates the *encoder* (APNG on #27, GIF today).
     const withWebCodecs = resolveAnimatedCodecPair({ webCodecs: true });
     const withoutWebCodecs = resolveAnimatedCodecPair({ webCodecs: false });
 
     // The decoder is the same format-aware dispatcher regardless of capability.
     expect(withWebCodecs.animatedDecoder).toBe(withoutWebCodecs.animatedDecoder);
-    // The encoder is still GIF on both branches today (#27 will diverge them).
-    expect(withWebCodecs.animatedEncoder).toBe(withoutWebCodecs.animatedEncoder);
+  });
+
+  it("picks the APNG (true-colour) encoder on WebCodecs devices, GIF elsewhere (issue #27)", () => {
+    // #27 + ADR-0007: the animated *output* format is device-determined. A
+    // WebCodecs-capable device gets the true-colour APNG encoder (UPNG.js,
+    // cnum=0 — no quantization); a device without WebCodecs keeps the 256-colour
+    // GIF encoder (gifenc). The encoder objects are module-level singletons, so
+    // the selected encoder is the exact APNG / GIF singleton (not a wrapper).
+    const withWebCodecs = resolveAnimatedCodecPair({ webCodecs: true });
+    const withoutWebCodecs = resolveAnimatedCodecPair({ webCodecs: false });
+
+    expect(withWebCodecs.animatedEncoder).toBe(browserAnimatedApngEncoder);
+    expect(withoutWebCodecs.animatedEncoder).toBe(browserAnimatedGifEncoder);
+    // The encoders genuinely diverge by capability now (was: both GIF, pre-#27).
+    expect(withWebCodecs.animatedEncoder).not.toBe(
+      withoutWebCodecs.animatedEncoder,
+    );
   });
 
   it("the returned pair is referentially stable across calls (same codec objects)", () => {
@@ -42,6 +61,11 @@ describe("resolveAnimatedCodecPair (issues #25 / #26)", () => {
     const b = resolveAnimatedCodecPair({ webCodecs: true });
     expect(a.animatedDecoder).toBe(b.animatedDecoder);
     expect(a.animatedEncoder).toBe(b.animatedEncoder);
+
+    const c = resolveAnimatedCodecPair({ webCodecs: false });
+    const d = resolveAnimatedCodecPair({ webCodecs: false });
+    expect(c.animatedDecoder).toBe(d.animatedDecoder);
+    expect(c.animatedEncoder).toBe(d.animatedEncoder);
   });
 
   it("the format-aware decoder routes WebP vs GIF to the right adapter (issue #26)", async () => {

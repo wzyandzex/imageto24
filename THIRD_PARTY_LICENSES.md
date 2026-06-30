@@ -67,3 +67,16 @@ above live in this file, shipped with the source distribution.
   worker-bound codec so non-WebP users never download it.
 - Source: https://github.com/jamsinclair/jsquash
 - Full text: https://github.com/jamsinclair/jsquash/blob/main/packages/webp/LICENSE
+
+## upng-js (UPNG.js)
+
+- License: MIT License
+- Used: animated-APNG encoder (issue #27). On WebCodecs-capable devices the
+  enhanced frames are re-encoded as a playable true-colour APNG via UPNG.js
+  (`cnum: 0` ⇒ lossless, no 256-colour quantization — the colour-fidelity win of
+  v3, ADR-0007). PNG colour type 6 (RGBA 8-bit/channel) carries transparency
+  natively; per-frame delays preserve the original timing. Lazy-loaded inside the
+  worker-bound codec, so a user who never produces APNG output (stills, or
+  animated output on a non-WebCodecs device) never downloads it (~30KB).
+- Source: https://github.com/photopea/UPNG.js
+- Full text: https://github.com/photopea/UPNG.js/blob/master/LICENSE
