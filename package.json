@@ -27,7 +27,8 @@
     "onnxruntime-web": "^1.21.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "tailwind-merge": "^3.3.1"
+    "tailwind-merge": "^3.3.1",
+    "upng-js": "^2.1.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
