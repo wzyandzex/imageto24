@@ -127,16 +127,17 @@ function App() {
     },
   );
   const { effectiveMode, aiDecision, target, factorResult, effectiveOutput } = readiness;
-  // Animated-GIF output is always GIF (issue #18): processAnimated re-encodes a
+  // Animated output is always GIF (issue #18): processAnimated re-encodes a
   // playable animated GIF via gifenc, so the user's PNG/WebP/JPEG choice is
   // irrelevant for an animated input — a 4K animated PNG makes no sense and GIF
-  // is the only animated output container v2 ships. Override the extension/mime
-  // and surface this honestly in the notice below so the choice isn't silently
-  // ignored. (Animated WebP/APNG stay on the still path, so this only applies
-  // to a multi-frame GIF — `source.animation.isAnimated`.)
-  const isAnimatedGif = !!source?.animation.isAnimated;
-  const effectiveExt = isAnimatedGif ? "gif" : outputExtension(effectiveOutput.format);
-  const effectiveMime = isAnimatedGif ? "image/gif" : outputMime(effectiveOutput.format);
+  // is the only animated output container shipped so far (APNG lands in #27).
+  // Override the extension/mime and surface this honestly in the notice below so
+  // the choice isn't silently ignored. This applies to any input routed as
+  // animated (multi-frame GIF since #18, animated WebP since #26) — both decode
+  // to frames and re-encode as GIF — so it keys off `isAnimated`, not the format.
+  const isAnimatedInput = !!source?.animation.isAnimated;
+  const effectiveExt = isAnimatedInput ? "gif" : outputExtension(effectiveOutput.format);
+  const effectiveMime = isAnimatedInput ? "image/gif" : outputMime(effectiveOutput.format);
   const label = targetLabel(target);
   // triggerDisabled from readiness + the separate "no source" guard the UI
   // still owns (no run makes sense before an image is loaded).
@@ -386,21 +387,22 @@ function App() {
                     ? "Original: dimensions read after conversion (HEIC isn't browser-decodable)."
                     : `Original: ${source.width} × ${source.height}px`}
                 </p>
-                {/* Animated-image notices (issue #16 detection; issue #18 makes
-                    the GIF path real). Three honest paths, never a silent surprise:
-                      - multi-frame GIF → frame count + "every frame upscaled and
-                        re-encoded as a playable GIF" (processAnimated, #18).
-                        ADR-0006 honest messaging: faithful = every frame; AI =
-                        first frame only, rest faithful. Output is always GIF
-                        (the only animated output v2 ships), stated so the user's
-                        PNG/WebP/JPEG choice isn't silently ignored.
-                      - animated WebP / APNG → detected but treated as a still in
-                        v2, with full support planned (PRD §Out of scope).
-                    A single-frame GIF or a plain still shows nothing here. */}
+                {/* Animated-image notices (issue #16 detection; #18 GIF path,
+                    #26 WebP path). Honest messaging, never a silent surprise:
+                      - multi-frame GIF / animated WebP → frame count + "every
+                        frame upscaled and re-encoded as a playable GIF"
+                        (processAnimated). ADR-0006 honest messaging: faithful =
+                        every frame; AI = first frame only, rest faithful. Output
+                        is always GIF (the only animated output container shipped
+                        so far; APNG lands in #27), stated so the user's PNG/WebP/
+                        JPEG choice isn't silently ignored.
+                      - APNG → detected but treated as a still, with full support
+                        planned (PRD §Out of scope; still-only until #27).
+                    A single-frame GIF/WebP or a plain still shows nothing here. */}
                 {source.animation.isAnimated && (
-                  <div className="flex flex-col gap-1" data-testid="animated-gif-notice">
+                  <div className="flex flex-col gap-1" data-testid="animated-notice">
                     <p className="text-muted-foreground">
-                      Animated GIF —{" "}
+                      {source.format === "webp" ? "Animated WebP" : "Animated GIF"} —{" "}
                       <span data-testid="animated-frame-count">
                         {source.animation.frameCount} frames
                       </span>{" "}

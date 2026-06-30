@@ -167,9 +167,23 @@ export interface DecodedAnimatedFrame {
  * Environment-bound (gifuct-js for GIF in v2, WebCodecs for WebP in v3,
  * lazy-loaded); always injected. The pure orchestrator never touches a codec
  * directly — it sees only frames (v3 generalization, issue #24).
+ *
+ * The {@link format} parameter (issue #26) lets one format-aware dispatcher
+ * decode multiple container formats behind a single seam, with format
+ * dispatch happening inside the adapter (PRD: "format dispatch happens inside
+ * the adapter"). The orchestrator forwards the detected {@link ImageFormat}
+ * verbatim; it never branches on it.
  */
 export interface AnimatedDecoderDeps {
-  decodeAnimated(buffer: ArrayBuffer): Promise<readonly DecodedAnimatedFrame[]>;
+  /**
+   * @param buffer the encoded animated container's raw bytes.
+   * @param format the detected {@link ImageFormat} (defaults to `"gif"` for
+   *   backward compatibility with the v2 GIF-only codec, which ignores it).
+   */
+  decodeAnimated(
+    buffer: ArrayBuffer,
+    format?: ImageFormat,
+  ): Promise<readonly DecodedAnimatedFrame[]>;
 }
 
 /** Options for {@link AnimatedEncoderDeps.encodeAnimated}. */

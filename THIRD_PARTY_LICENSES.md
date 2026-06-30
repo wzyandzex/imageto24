@@ -55,3 +55,15 @@ above live in this file, shipped with the source distribution.
   browser via the libheif WASM build, lazy-loaded so only HEIC users download it.
 - Source: https://github.com/alexcorvi/heic2any
 - Full text: https://github.com/alexcorvi/heic2any/blob/master/LICENSE.txt
+
+## @jsquash/webp (wasm WebP fallback)
+
+- License: MIT License
+- Used: animated-WebP *wasm fallback* decoder (issue #26). On devices without
+  WebCodecs `ImageDecoder`, this libwebp-based wasm decoder provides the
+  best-effort decode. Note: it exposes a still-image decode only — there is no
+  mature per-frame animated-WebP wasm decoder in the browser ecosystem — so the
+  fallback is honest single-frame degradation (ADR-0002). Lazy-loaded inside the
+  worker-bound codec so non-WebP users never download it.
+- Source: https://github.com/jamsinclair/jsquash
+- Full text: https://github.com/jamsinclair/jsquash/blob/main/packages/webp/LICENSE

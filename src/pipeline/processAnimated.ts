@@ -72,13 +72,16 @@ export async function processAnimated(
     throw new Error("processAnimated requires animatedDecoder and animatedEncoder");
   }
 
-  // 1. Decode — gifuct-js composited into full-canvas ImageData frames.
-  const frames = await deps.animatedDecoder.decodeAnimated(file.buffer);
+  // 1. Decode — full-canvas composited ImageData frames. The decoder is a
+  // format-aware dispatcher (issue #26): it routes by `file.format` to the
+  // right container's per-frame decode (gifuct-js for GIF, WebCodecs ImageDecoder
+  // or a wasm fallback for WebP). The orchestrator never branches on format.
+  const frames = await deps.animatedDecoder.decodeAnimated(file.buffer, file.format);
   if (frames.length === 0) {
-    throw new Error("Animated GIF contained no decodable frames");
+    throw new Error("Animated image contained no decodable frames");
   }
 
-  // GIF canvas is the logical screen; every frame shares it.
+  // The canvas is the logical screen; every frame shares it.
   const canvasWidth = frames[0].imageData.width;
   const canvasHeight = frames[0].imageData.height;
 

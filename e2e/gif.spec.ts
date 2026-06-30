@@ -47,9 +47,9 @@ test("animated GIF: detected frame count + 'animation preserved' notice", async 
   // The animated notice renders: frame count (3) + the honest "animation
   // preserved" message (issue #18 — the placeholder "treated as a still for
   // now" notice is gone; the GIF now stays animated).
-  await expect(page.getByTestId("animated-gif-notice")).toBeVisible();
+  await expect(page.getByTestId("animated-notice")).toBeVisible();
   await expect(page.getByTestId("animated-frame-count")).toContainText(/3 frames?/);
-  await expect(page.getByTestId("animated-gif-notice")).toContainText(
+  await expect(page.getByTestId("animated-notice")).toContainText(
     /animation is preserved/i,
   );
 
