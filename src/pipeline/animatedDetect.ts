@@ -1,12 +1,12 @@
 /**
  * Animated-image detection — pure, environment-free (issue #16).
  *
- * This is the foundation of the GIF line: a cheap, synchronous scan of an
+ * This is the foundation of the animated line: a cheap, synchronous scan of an
  * uploaded file that decides whether it is an {@link AnimatedImage}
  * (multi-frame) or a still, and routes accordingly. Per ADR-0006 and the v2
- * PRD, only animated GIF is processed as animated in v2; animated WebP and APNG
- * are *detected* (so we can tell the user honestly that they're treated as
- * stills) but never routed to {@link processAnimated}.
+ * PRD, animated GIF and animated WebP are both routed to
+ * {@link processAnimated} (WebP lands in issue #26); APNG is *detected* (so we
+ * can tell the user honestly that it's treated as a still) but not yet routed.
  *
  * Domain terms follow `CONTEXT.md` "Animated image" / "Frame".
  *
@@ -14,43 +14,48 @@
  * no `createImageBitmap`. It walks the GIF's block list by *sub-block length*
  * (advancing past each data block in O(number-of-sub-blocks), not
  * O(file size)), so it is milliseconds even for a multi-MB GIF and runs on the
- * main thread on upload without blocking. WebP/APNG stop at a single chunk
- * header (the presence of `ANIM` / `acTL`). The actual per-frame decode happens
- * later, in the worker (#18 lands `gifuct-js` + `gifenc`); here we only count.
+ * main thread on upload without blocking. WebP walks the RIFF chunks counting
+ * `ANMF` frames; APNG stops at a single `acTL` chunk. The actual per-frame
+ * decode happens later, in the worker (#18 GIF, #26 WebP); here we only count.
  */
 import type { ImageFormat } from "./types";
 
 /**
  * The result of an animation scan.
  *
- * `isAnimated` is true only when the file is a GIF carrying more than one
- * frame — the single container v2 routes to {@link processAnimated}. A
- * single-frame GIF, a non-GIF, or a GIF whose header we could not parse all
- * land as a still (`isAnimated: false`), which routes to {@link processImage}.
+ * `isAnimated` is true when the file is a multi-frame container the pipeline
+ * routes to {@link processAnimated} — animated GIF (v2) and animated WebP (v3,
+ * issue #26). A single-frame file or one whose header we could not parse lands
+ * as a still (`isAnimated: false`), routing to {@link processImage}.
  *
- * `animatedWebp` / `apng` are detection-only flags: when true the file *is*
- * multi-frame, but v2 still treats it as a still. The UI surfaces this as an
- * honest notice (PRD user story #19/#20) rather than silently degrading.
+ * `apng` is a detection-only flag: when true the file *is* multi-frame, but v3
+ * still treats it as a still (APNG encode lands in #27). The UI surfaces this as
+ * an honest notice (PRD user story #19/#20) rather than silently degrading.
  */
 export interface AnimationScan {
-  /** True only for a multi-frame GIF — the one animated path v2 supports. */
+  /**
+   * True for a multi-frame container the pipeline animates — GIF (v2) or WebP
+   * (v3, issue #26). APNG stays detection-only until #27.
+   */
   readonly isAnimated: boolean;
   /**
    * The number of frames detected, or 0 when not animated / uncountable. For a
-   * multi-frame GIF this is the count of image descriptors in the stream — the
-   * exact number the per-frame loop in #18 will process. Surfaced to the UI so
-   * the user understands what "animated" means concretely (PRD story #17).
+   * multi-frame GIF this is the count of image descriptors; for an animated
+   * WebP the count of `ANMF` chunks — in both cases the exact number the
+   * per-frame decode loop will process. Surfaced to the UI so the user
+   * understands what "animated" means concretely (PRD story #17).
    */
   readonly frameCount: number;
   /**
-   * True when a WebP file's "ANIM" chunk indicates animation. Detection-only:
-   * v2 still treats it as a still (PRD §Out of scope). The UI states this
-   * honestly rather than silently freezing the animation.
+   * True when a WebP file's "ANIM" chunk indicates animation. In v3 (issue #26)
+   * this is always equal to {@link isAnimated} for WebP — the file is routed to
+   * {@link processAnimated}. Retained as a distinct flag so callers can branch
+   * on format without re-checking the resolved {@link ImageFormat}.
    */
   readonly animatedWebp: boolean;
   /**
    * True when a PNG file's `acTL` chunk indicates it is an APNG. Detection-only
-   * for the same reason as {@link animatedWebp} — v2 processes the first frame.
+   * — v3 processes the first frame; APNG encode lands in #27.
    */
   readonly apng: boolean;
 }
@@ -267,9 +272,13 @@ function scanWebp(buffer: ArrayBuffer): AnimationScan {
     return STILL;
   }
   // Walk the chunk list: each chunk is FourCC(4) + size(4 little-endian) + data.
-  // Odd-sized chunks are padded by a trailing byte. The "ANIM" chunk (when
-  // present) is the animation header — its mere presence means animated.
+  // Odd-sized chunks are padded by a trailing byte. The "ANIM" chunk is the
+  // animation header — its mere presence means animated; each "ANMF" chunk is
+  // one frame (issue #26 routes animated WebP to processAnimated, so the frame
+  // count is now extracted and surfaced, mirroring the GIF scan).
   let pos = 12;
+  let animated = false;
+  let frameCount = 0;
   while (pos + 8 <= bytes.length) {
     const fourcc = String.fromCharCode(
       bytes[pos],
@@ -284,12 +293,23 @@ function scanWebp(buffer: ArrayBuffer): AnimationScan {
       (bytes[pos + 7] >>> 0) * 0x1000000;
     pos += 8;
     if (fourcc === "ANIM") {
-      return { isAnimated: false, frameCount: 0, animatedWebp: true, apng: false };
+      animated = true;
+    } else if (fourcc === "ANMF") {
+      frameCount++;
     }
     // Advance past the chunk data (+1 pad byte for odd sizes, per RIFF).
     pos += size + (size % 2);
   }
-  return STILL;
+  if (!animated) return STILL;
+  // A frame count below 2 means a malformed animation header with no ANMF
+  // frames; treat it as a still rather than hand processAnimated zero frames.
+  if (frameCount < 2) return STILL;
+  return {
+    isAnimated: true,
+    frameCount,
+    animatedWebp: true,
+    apng: false,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

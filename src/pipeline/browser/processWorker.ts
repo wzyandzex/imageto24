@@ -144,14 +144,15 @@ self.onmessage = async (event: MessageEvent<{
       post({ type: "decode-progress", phase: "heic-converting" });
     }
     const deps = browserPipelineDeps(source);
-    // Animated routing (issue #16): the UI ran `detectAnimation` on upload and
-    // set `animated` when the file is a multi-frame GIF. Dispatch to the sibling
-    // `processAnimated` orchestrator; everything else (stills, single-frame
-    // GIFs, animated WebP/APNG treated as stills) stays on `processImage`. The
-    // two orchestrators share the PipelineDeps seam, so the worker boundary is
-    // the only place this branch exists. #18's processAnimated decodes every
-    // frame → upscales → re-encodes via gifenc; the per-frame progress it emits
-    // is forwarded as `frame-progress` so the UI shows the GIF advancing.
+    // Animated routing (issues #16/#26): the UI ran `detectAnimation` on upload
+    // and set `animated` when the file is a multi-frame GIF or animated WebP.
+    // Dispatch to the sibling `processAnimated` orchestrator; everything else
+    // (stills, single-frame GIF/WebP, APNG treated as stills) stays on
+    // `processImage`. The two orchestrators share the PipelineDeps seam, so the
+    // worker boundary is the only place this branch exists. processAnimated
+    // decodes every frame (gifuct-js for GIF, WebCodecs ImageDecoder / wasm for
+    // WebP via the format-aware dispatcher) → upscales → re-encodes; the
+    // per-frame progress it emits is forwarded as `frame-progress`.
     const run = animated
       ? processAnimated(
           deps,

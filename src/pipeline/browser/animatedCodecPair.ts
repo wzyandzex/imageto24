@@ -13,15 +13,60 @@
  * This module owns the *selection* logic only — a pure function of a boolean
  * capability. The browser-bound detection (`typeof ImageDecoder`) lives in
  * `deps.ts`, which calls this on every `browserPipelineDeps` call (no global
- * cache: grilling decision 6). The actual WebCodecs/UPNG implementations land
- * in #26/#27; until then both branches resolve to the existing GIF codec so
- * nothing breaks.
+ * cache: grilling decision 6). #26 wires real WebP decode (WebCodecs + wasm
+ * fallback) into the format-aware dispatcher; the APNG encoder lands in #27.
  */
 import {
   browserAnimatedGifDecoder,
   browserAnimatedGifEncoder,
 } from "./animatedGifCodec";
-import type { AnimatedDecoderDeps, AnimatedEncoderDeps } from "../types";
+import { browserAnimatedWebpDecoder } from "./animatedWebpCodec";
+import type {
+  AnimatedDecoderDeps,
+  AnimatedEncoderDeps,
+  ImageFormat,
+} from "../types";
+
+/**
+ * A format-aware decoder: routes the {@link decodeAnimated} call to the
+ * per-format adapter, so a single seam serves every animated input format (PRD:
+ * "format dispatch happens inside the adapter"). `processAnimated` forwards the
+ * detected {@link ImageFormat} verbatim and never branches on it.
+ *
+ * GIF → the v2 gifuct-js decoder; WebP → the v3 decoder (#26), which owns its
+ * own WebCodecs-vs-wasm fallback internally. Any other (future) format defaults
+ * to the GIF adapter.
+ *
+ * The `webCodecs` capability is *not* consulted here: the WebP adapter performs
+ * its own `typeof ImageDecoder` gate at decode time, so one dispatcher works on
+ * every device. The capability still differentiates the *encoder* (true-colour
+ * APNG on capable devices, #27; 256-colour GIF everywhere else).
+ */
+function formatAwareDecoder(
+  webp: AnimatedDecoderDeps,
+  gif: AnimatedDecoderDeps,
+): AnimatedDecoderDeps {
+  return {
+    decodeAnimated: (buffer, format) => {
+      // `format` is optional for backward compat (v2 GIF-only callers); default
+      // to GIF so the v2 call shape `decodeAnimated(buffer)` still routes to the
+      // gifuct-js adapter.
+      const adapter = format === "webp" ? webp : gif;
+      return adapter.decodeAnimated(buffer, format);
+    },
+  };
+}
+
+/**
+ * The single format-aware decoder used by every {@link resolveAnimatedCodecPair}
+ * result. Built once at module load so the returned wrapper is referentially
+ * stable across calls (deps-equality checks and tests rely on this), and so the
+ * WebP adapter's capability gate is evaluated per-decode, not per-selection.
+ */
+const formatAwareAnimatedDecoder = formatAwareDecoder(
+  browserAnimatedWebpDecoder,
+  browserAnimatedGifDecoder,
+);
 
 /**
  * The resolved codec pair for a device. Both fields are always present — the
@@ -49,10 +94,12 @@ export interface AnimatedCapability {
  * turns `typeof ImageDecoder` into this boolean; everything downstream is a
  * pure function of it, so the selection is unit-testable without a browser.
  *
- * Both branches currently resolve to the existing GIF codec (issue #25 ships
- * the selection mechanism; the WebCodecs/UPNG implementations land in
- * #26/#27). Once those land, the `webCodecs === true` branch swaps in the
- * high-fidelity pair.
+ * The decoder is the same format-aware dispatcher on both branches: it routes
+ * WebP to {@link browserAnimatedWebpDecoder} (which gates WebCodecs-vs-wasm at
+ * decode time, #26) and everything else to the gifuct-js GIF decoder. The
+ * capability differentiates the *encoder*: a high-fidelity APNG encoder on
+ * WebCodecs devices (#27) vs. the 256-colour GIF encoder elsewhere. Until #27
+ * lands both branches use the GIF encoder, so output is GIF today regardless.
  *
  * @param capability the device's animated-codec capability.
  * @returns the codec pair `processAnimated` should be wired with.
@@ -60,18 +107,19 @@ export interface AnimatedCapability {
 export function resolveAnimatedCodecPair(
   capability: AnimatedCapability,
 ): AnimatedCodec {
-  // TODO(#26/#27): when WebCodecs WebP decode + UPNG APNG encode land, the
-  // high-fidelity pair is selected here. Until then both paths use the GIF
-  // codec so v3-1 (generalized codec) + v3-2 (this selection) ship without
-  // requiring v3-3/v3-4 to be done first.
-  if (capability.webCodecs) {
-    return {
-      animatedDecoder: browserAnimatedGifDecoder,
-      animatedEncoder: browserAnimatedGifEncoder,
-    };
-  }
+  // #26: the decoder routes animated WebP through the WebCodecs/wasm adapter
+  // (its own capability gate), GIF through gifuct-js. The encoder is still GIF
+  // on both branches — the true-colour APNG encoder lands in #27, keyed off
+  // `webCodecs === true`. Both branches keep a working GIF path so a device
+  // without WebCodecs never degrades to a hard error (ADR-0002).
+  //
+  // `capability` is the contract for #27's encoder split (APNG when
+  // `webCodecs === true`, GIF otherwise); today both branches share the GIF
+  // encoder, so the value is intentionally not yet read. Kept on the signature
+  // so the call site (`deps.ts`) and tests stay stable across #27.
+  void capability;
   return {
-    animatedDecoder: browserAnimatedGifDecoder,
+    animatedDecoder: formatAwareAnimatedDecoder,
     animatedEncoder: browserAnimatedGifEncoder,
   };
 }

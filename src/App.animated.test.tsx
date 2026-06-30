@@ -104,11 +104,33 @@ function be32(n: number): number[] {
   return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
 }
 
-/** Build an animated WebP (RIFF + WEBP + ANIM chunk). Detection-only in v2. */
-function buildAnimatedWebp(): Uint8Array {
-  const payload = [...fourcc("ANIM"), ...le32(6), 0, 0, 0, 0, 0, 0];
-  const riffBody = [...fourcc("WEBP"), ...payload];
-  return new Uint8Array([...fourcc("RIFF"), ...le32(riffBody.length), ...riffBody]);
+/**
+ * Build an animated WebP (RIFF + WEBP + ANIM + N×ANMF chunks). Issue #26
+ * routes multi-frame WebP to processAnimated, so the fixture carries real
+ * ANMF frames (one per frame) — enough that detectAnimation reports
+ * isAnimated + the frame count, like the GIF fixture does.
+ */
+function buildAnimatedWebp(frames = 2): Uint8Array {
+  // ANIM chunk: the animation header (background colour + loop count). 6 bytes.
+  const anim = [...fourcc("ANIM"), ...le32(6), 0, 0, 0, 0, 0, 0];
+  // Each ANMF chunk is one frame: the real 16-byte frame header is
+  // FrameX(3) + FrameY(3) + FrameWidthMinusOne(3) + FrameHeightMinusOne(3) +
+  // FrameDuration(3) + Flags(1). The scan counts chunks by the declared size —
+  // it never decodes pixels — but the size MUST match the byte count so the
+  // walk lands on each next chunk correctly (else the stream desyncs).
+  const anmf = () => [
+    ...fourcc("ANMF"),
+    ...le32(16),
+    0, 0, 0, // FrameX (24-bit LE)
+    0, 0, 0, // FrameY (24-bit LE)
+    0, 0, 0, // FrameWidthMinusOne (24-bit LE)
+    0, 0, 0, // FrameHeightMinusOne (24-bit LE)
+    0x0a, 0x00, 0x00, // FrameDuration (24-bit LE, 100ms)
+    0x00, // Flags
+  ];
+  const body = [...fourcc("WEBP"), ...anim];
+  for (let i = 0; i < frames; i++) body.push(...anmf());
+  return new Uint8Array([...fourcc("RIFF"), ...le32(body.length), ...body]);
 }
 
 /** CRC32 (IEEE) for PNG chunk checksums. */
@@ -249,7 +271,7 @@ describe("animated-GIF upload UI (issue #16)", () => {
     // Honest "animation preserved" messaging (issue #18: processAnimated now
     // upscales every frame and re-encodes a playable GIF, replacing the old
     // "treated as a still for now" placeholder notice).
-    expect(screen.getByTestId("animated-gif-notice").textContent).toMatch(
+    expect(screen.getByTestId("animated-notice").textContent).toMatch(
       /animation is preserved/i,
     );
     // The animated-WebP / APNG notices must NOT show for a GIF.
@@ -336,20 +358,22 @@ describe("animated-GIF upload UI (issue #16)", () => {
   });
 });
 
-describe("animated WebP / APNG notices (issue #16, PRD stories #19/#20)", () => {
-  it("shows the animated-WebP 'treated as a still in v2' notice on upload", async () => {
+describe("animated WebP / APNG notices (issue #16/#26, PRD stories #19/#20)", () => {
+  it("routes an animated WebP to the animated path and shows the frame-count notice (issue #26)", async () => {
     await renderApp();
-    // A real animated WebP (RIFF + ANIM chunk). detectAnimation flags it
-    // animatedWebp; the UI surfaces the honest notice rather than silently
-    // freezing it. It must NOT be routed as animated-GIF.
-    await upload(buildAnimatedWebp(), "anim.webp", "image/webp");
+    // A multi-frame WebP (RIFF + ANIM + ≥2 ANMF). Issue #26 routes animated
+    // WebP to processAnimated, so the UI shows the animated notice with the
+    // detected frame count — the same shape as a multi-frame GIF. It must NOT
+    // show the v2 "treated as a still" notice (that was the pre-#26 behaviour).
+    await upload(buildAnimatedWebp(2), "anim.webp", "image/webp");
 
-    expect(screen.getByTestId("animated-webp-notice")).toBeInTheDocument();
-    expect(screen.getByTestId("animated-webp-notice").textContent).toMatch(
-      /treated as a still|first frame/i,
+    expect(screen.getByTestId("animated-notice")).toBeInTheDocument();
+    expect(screen.getByTestId("animated-frame-count").textContent).toMatch(
+      /2 frames/,
     );
-    // Not the GIF path, not the APNG path.
-    expect(screen.queryByTestId("animated-gif-notice")).toBeNull();
+    // The honest "treated as a still" notice no longer applies to a routed
+    // animated WebP (kept only for detection-only fallback cases).
+    expect(screen.queryByTestId("animated-webp-notice")).toBeNull();
     expect(screen.queryByTestId("apng-notice")).toBeNull();
   });
 
@@ -367,27 +391,34 @@ describe("animated WebP / APNG notices (issue #16, PRD stories #19/#20)", () => 
     expect(screen.queryByTestId("animated-webp-notice")).toBeNull();
   });
 
-  it("does NOT set the animated routing flag for an animated WebP (stays on processImage)", async () => {
-    // Animated WebP/APNG are detected but never routed to processAnimated —
-    // they stay on the still path (first frame), with the honest notice. The
-    // `animated` flag must therefore stay unset, so the worker dispatches to
-    // processImage, not processAnimated.
-    let captured: { animated?: boolean } | undefined;
+  it("sets the animated routing flag for an animated WebP (dispatches to processAnimated)", async () => {
+    // Issue #26: a multi-frame WebP is now routed to processAnimated, like a
+    // multi-frame GIF. The `animated` flag must therefore be set, so the worker
+    // dispatches to processAnimated (which forwards format to the decoder).
+    let captured: { animated?: boolean; format?: string } | undefined;
     processImageInWorkerImpl = (input) => {
-      captured = input as { animated?: boolean };
+      captured = input as { animated?: boolean; format?: string };
       return Promise.resolve({
         buffer: new ArrayBuffer(8),
-        meta: { mode: "faithful", factor: 4, width: 3840, height: 2160, noUpscale: false },
+        meta: {
+          mode: "faithful",
+          factor: 4,
+          width: 3840,
+          height: 2160,
+          noUpscale: false,
+          frameCount: 2,
+        },
       });
     };
 
     await renderApp();
-    await upload(buildAnimatedWebp(), "anim.webp", "image/webp");
+    await upload(buildAnimatedWebp(2), "anim.webp", "image/webp");
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("upscale-button"));
     });
     await waitFor(() => expect(captured).toBeDefined());
-    expect(captured!.animated).toBeFalsy();
+    expect(captured!.animated).toBe(true);
+    expect(captured!.format).toBe("webp");
   });
 });

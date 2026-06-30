@@ -380,6 +380,31 @@ describe("processAnimated — boundary + error paths", () => {
     expect(spies.encoder).toHaveBeenCalledTimes(1);
   });
 
+  it("forwards the detected format to decodeAnimated (issue #26 format dispatch)", async () => {
+    // #26: decodeAnimated is now format-aware (buffer, format). The orchestrator
+    // forwards `file.format` verbatim so the dispatcher routes to the right
+    // adapter; it never branches on format itself. Pin that the format reaches
+    // the decoder for both the GIF and WebP call shapes.
+    const frames = decodedFrames(2);
+    const { deps, spies } = makeStubDeps(frames);
+
+    await processAnimated(
+      deps,
+      { buffer: new ArrayBuffer(8), format: "webp" },
+      {
+        mode: "faithful",
+        target: { factor: 2 },
+        outputFormat: "png",
+        lossless: true,
+        preserveExif: false,
+      },
+    );
+
+    expect(spies.decoder).toHaveBeenCalledTimes(1);
+    // The second positional arg is the format the dispatcher routes on.
+    expect(spies.decoder.mock.calls[0][1]).toBe("webp");
+  });
+
   it("throws when the decoded GIF has no frames", async () => {
     const { deps } = makeStubDeps([]); // empty decode
 

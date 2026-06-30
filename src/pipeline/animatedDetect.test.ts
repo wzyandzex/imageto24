@@ -1,11 +1,11 @@
 // @vitest-environment node
 //
-// Animated-image detection tests (issue #16). The detection function is a pure
-// header scan — no decode, no codec — so it runs under Vitest in Node with
-// hand-built byte buffers. We cover the acceptance criteria: a multi-frame GIF
-// is detected (isAnimated + frameCount), a single-frame GIF and a non-GIF are
-// not, and animated WebP / APNG are detected as such (detection-only; v2 still
-// treats them as stills).
+// Animated-image detection tests (issue #16; WebP routing in #26). The detection
+// function is a pure header scan — no decode, no codec — so it runs under Vitest
+// in Node with hand-built byte buffers. We cover the acceptance criteria: a
+// multi-frame GIF is detected (isAnimated + frameCount), a single-frame GIF and
+// a non-GIF are not, an animated WebP (ANIM + ≥2 ANMF) is routed as animated
+// since #26, and APNG is detected as such (detection-only until #27).
 //
 // The GIF fixtures are built byte-for-byte from the GIF spec so the scan walks a
 // real stream — image descriptors, graphic-control extensions, LZW sub-blocks.
@@ -111,11 +111,16 @@ function le32(n: number): number[] {
   return [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >>> 24) & 0xff];
 }
 
-/** Build a WebP with an ANIM chunk (animated). VP8X omitted — the scan keys off ANIM. */
-function buildAnimatedWebp(): ArrayBuffer {
-  // RIFF chunk: "RIFF" + size + "WEBP" + payload. The ANIM chunk is 6 bytes.
-  const payload = [...fourcc("ANIM"), ...le32(6), 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-  const riffBody = [...fourcc("WEBP"), ...payload];
+/** Build an animated WebP carrying an ANIM chunk plus `frames` ANMF frames. */
+function buildAnimatedWebp(frames = 2): ArrayBuffer {
+  // RIFF chunk: "RIFF" + size + "WEBP" + payload. ANIM is the animation header
+  // (6 bytes); each ANMF is one frame (we emit minimal 0-byte-payload frames —
+  // the scan counts ANMF chunks, it never decodes them).
+  const chunks: number[] = [...fourcc("ANIM"), ...le32(6), 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+  for (let i = 0; i < frames; i++) {
+    chunks.push(...fourcc("ANMF"), ...le32(0));
+  }
+  const riffBody = [...fourcc("WEBP"), ...chunks];
   const bytes = [...fourcc("RIFF"), ...le32(riffBody.length), ...riffBody];
   return new Uint8Array(bytes).buffer;
 }
@@ -384,14 +389,23 @@ describe("detectAnimation — non-GIF still formats", () => {
   });
 });
 
-describe("detectAnimation — animated WebP (detection-only, v2 still treats as still)", () => {
-  it("detects an animated WebP via its ANIM chunk", () => {
-    const scan = detectAnimation(buildAnimatedWebp(), "webp");
-    // Detection-only: animatedWebp is true, but isAnimated stays false — v2 routes
-    // it to processImage (first frame), not processAnimated (PRD §Out of scope).
+describe("detectAnimation — animated WebP (issue #26 routes to processAnimated)", () => {
+  it("detects an animated WebP and counts its ANMF frames", () => {
+    const scan = detectAnimation(buildAnimatedWebp(3), "webp");
+    // Issue #26: animated WebP is now routed to processAnimated, so the scan
+    // reports isAnimated + the ANMF frame count (mirroring the GIF scan),
+    // rather than the v2 detection-only flag.
     expect(scan.animatedWebp).toBe(true);
+    expect(scan.isAnimated).toBe(true);
+    expect(scan.frameCount).toBe(3);
+    expect(scan.apng).toBe(false);
+  });
+
+  it("treats an ANIM header with a single ANMF frame as a still", () => {
+    // One ANMF: a malformed/redundant animation (no second frame to animate to).
+    // Degrade to still rather than hand processAnimated a one-frame "animation".
+    const scan = detectAnimation(buildAnimatedWebp(1), "webp");
     expect(scan.isAnimated).toBe(false);
-    expect(scan.frameCount).toBe(0);
   });
 
   it("identifies a still WebP (no ANIM chunk)", () => {
