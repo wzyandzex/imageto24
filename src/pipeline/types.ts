@@ -308,7 +308,7 @@ export interface ModelLoaderDeps {
 }
 
 /**
- * Detects WebGPU support and an estimated memory budget for AI work
+ * Detects WebGPU support, the AI memory budget, and WebCodecs support
  * (see CONTEXT.md "Device capability check"). Environment-bound; always injected.
  */
 export interface CapabilityDetector {
@@ -326,6 +326,18 @@ export interface DeviceCapability {
    * reflects that no AI work can run at all.
    */
   readonly memBudget: number;
+  /**
+   * Whether the WebCodecs `ImageDecoder` API is available. This is the gate for
+   * the high-fidelity animated-output path (ADR-0007): a WebCodecs-capable
+   * device decodes animated WebP/GIF frames losslessly and re-encodes them as
+   * true-colour APNG; a device without WebCodecs falls back to wasm decode +
+   * 256-colour GIF output. The UI surfaces this honestly (issue #29): the output
+   * format is device-determined, not user-selected, for animated input.
+   * Optional (defaults to absent ⇒ falsy ⇒ GIF degrade): the AI-capability
+   * tests and fixtures don't care about WebCodecs, so they omit it; only the
+   * browser probe and the animated-output UI read it.
+   */
+  readonly webCodecs?: boolean;
 }
 
 /** Options for {@link EncoderDeps.encode}. */

@@ -126,18 +126,26 @@ function App() {
       lossless: webpLossless,
     },
   );
-  const { effectiveMode, aiDecision, target, factorResult, effectiveOutput } = readiness;
-  // Animated output is always GIF (issue #18): processAnimated re-encodes a
-  // playable animated GIF via gifenc, so the user's PNG/WebP/JPEG choice is
-  // irrelevant for an animated input — a 4K animated PNG makes no sense and GIF
-  // is the only animated output container shipped so far (APNG lands in #27).
-  // Override the extension/mime and surface this honestly in the notice below so
-  // the choice isn't silently ignored. This applies to any input routed as
-  // animated (multi-frame GIF since #18, animated WebP since #26) — both decode
-  // to frames and re-encode as GIF — so it keys off `isAnimated`, not the format.
+  const { effectiveMode, aiDecision, target, factorResult, effectiveOutput, capability } = readiness;
+  // Animated output format is device-determined (ADR-0007, issue #29): the user
+  // does not choose it. A WebCodecs-capable device (ImageDecoder present) gets
+  // the true-colour APNG encoder (UPNG.js, cnum:0 — no quantization); a device
+  // without WebCodecs gets the 256-colour GIF encoder (gifenc) — an honest
+  // degrade, since no mature browser wasm lib decodes animated WebP per-frame
+  // and GIF is the only universally-decodable animated container there. The
+  // capability probe runs once on mount (useRunReadiness); this mirrors the
+  // exact `hasWebCodecs()` gate the worker uses when resolving the codec pair,
+  // so the label shown here can never disagree with the bytes the run emits.
   const isAnimatedInput = !!source?.animation.isAnimated;
-  const effectiveExt = isAnimatedInput ? "gif" : outputExtension(effectiveOutput.format);
-  const effectiveMime = isAnimatedInput ? "image/gif" : outputMime(effectiveOutput.format);
+  const animatedOutputIsApng = !!capability?.webCodecs;
+  const animatedOutputExt = animatedOutputIsApng ? "apng" : "gif";
+  const animatedOutputMime = animatedOutputIsApng ? "image/apng" : "image/gif";
+  const effectiveExt = isAnimatedInput
+    ? animatedOutputExt
+    : outputExtension(effectiveOutput.format);
+  const effectiveMime = isAnimatedInput
+    ? animatedOutputMime
+    : outputMime(effectiveOutput.format);
   const label = targetLabel(target);
   // triggerDisabled from readiness + the separate "no source" guard the UI
   // still owns (no run makes sense before an image is loaded).
@@ -350,6 +358,8 @@ function App() {
           setOutputFormat={setOutputFormat}
           webpLossless={webpLossless}
           setWebpLossless={setWebpLossless}
+          isAnimated={isAnimatedInput}
+          animatedOutputIsApng={animatedOutputIsApng}
         />
 
         {source && (
@@ -388,16 +398,18 @@ function App() {
                     : `Original: ${source.width} × ${source.height}px`}
                 </p>
                 {/* Animated-image notices (issue #16 detection; #18 GIF path,
-                    #26 WebP path). Honest messaging, never a silent surprise:
+                    #26 WebP path; #29 device-determined output). Honest messaging,
+                      never a silent surprise:
                       - multi-frame GIF / animated WebP → frame count + "every
-                        frame upscaled and re-encoded as a playable GIF"
+                        frame upscaled and re-encoded as a playable animation"
                         (processAnimated). ADR-0006 honest messaging: faithful =
-                        every frame; AI = first frame only, rest faithful. Output
-                        is always GIF (the only animated output container shipped
-                        so far; APNG lands in #27), stated so the user's PNG/WebP/
+                        every frame; AI = first frame only, rest faithful. The
+                        output container is device-determined (ADR-0007, issue
+                        #29): true-colour APNG on a WebCodecs-capable browser,
+                        256-colour GIF otherwise — stated so the user's PNG/WebP/
                         JPEG choice isn't silently ignored.
-                      - APNG → detected but treated as a still, with full support
-                        planned (PRD §Out of scope; still-only until #27).
+                      - APNG input → detected but treated as a still (detection-
+                        only notice; not yet processed as animated).
                     A single-frame GIF/WebP or a plain still shows nothing here. */}
                 {source.animation.isAnimated && (
                   <div className="flex flex-col gap-1" data-testid="animated-notice">
@@ -412,8 +424,11 @@ function App() {
                       {effectiveMode === "ai"
                         ? "AI mode enhances the first frame and interpolates the rest (faithful); the animation is preserved."
                         : "Faithful mode upscales every frame; the animation is preserved."}{" "}
-                      Output is re-encoded as a playable animated GIF (a 256-colour
-                      container, so fine detail may band).
+                      <span data-testid="animated-output-format">
+                        {animatedOutputIsApng
+                          ? "Output is re-encoded as a playable animated PNG (APNG) in true colour — no detail lost."
+                          : "Output is re-encoded as a playable animated GIF (256 colours — your browser lacks WebCodecs, so fine detail may band)."}
+                      </span>
                     </p>
                   </div>
                 )}
@@ -684,6 +699,13 @@ interface SettingsControlsProps {
   /** WebP lossless/lossy toggle (issue #10); only meaningful for WebP. */
   webpLossless: boolean;
   setWebpLossless: (v: boolean) => void;
+  /** Whether the loaded source is animated (issue #29): the output format
+   *  selector becomes read-only and shows the device-determined container. */
+  isAnimated: boolean;
+  /** Whether the animated output will be APNG (WebCodecs present) vs GIF.
+   *  Mirrors the worker's codec-pair resolution so the label never disagrees
+   *  with the bytes (ADR-0007). */
+  animatedOutputIsApng: boolean;
 }
 
 /**
@@ -720,6 +742,8 @@ function SettingsControls({
   setOutputFormat,
   webpLossless,
   setWebpLossless,
+  isAnimated,
+  animatedOutputIsApng,
 }: SettingsControlsProps) {
   return (
     <section className="flex flex-col gap-8">
@@ -896,6 +920,8 @@ function SettingsControls({
         setOutputFormat={setOutputFormat}
         webpLossless={webpLossless}
         setWebpLossless={setWebpLossless}
+        isAnimated={isAnimated}
+        animatedOutputIsApng={animatedOutputIsApng}
       />
 
       {/* EXIF option */}
@@ -1023,6 +1049,15 @@ interface OutputFormatControlProps {
   setOutputFormat: (f: OutputFormat) => void;
   webpLossless: boolean;
   setWebpLossless: (v: boolean) => void;
+  /**
+   * True when the loaded source is an animated image (multi-frame GIF/WebP).
+   * The animated output container is device-determined (ADR-0007, issue #29),
+   * not user-selected, so the PNG/WebP/JPEG cards are irrelevant and the control
+   * switches to a read-only label stating what will actually be emitted.
+   */
+  isAnimated: boolean;
+  /** The device-determined animated output is APNG (WebCodecs) or GIF (degrade). */
+  animatedOutputIsApng: boolean;
 }
 
 /**
@@ -1046,8 +1081,38 @@ function OutputFormatControl({
   setOutputFormat,
   webpLossless,
   setWebpLossless,
+  isAnimated,
+  animatedOutputIsApng,
 }: OutputFormatControlProps) {
   const faithful = mode === "faithful";
+  // Animated input (issue #29 / ADR-0007): the output format is device-determined
+  // (APNG on WebCodecs, GIF otherwise) and is NOT one of PNG/WebP/JPEG, so the
+  // usual selector is meaningless. Render a read-only notice of the actual format
+  // + the reason instead of disabling the three cards (which would imply the
+  // user's PNG/WebP/JPEG pick *almost* applied). The animation-preserved notice
+  // in the source panel carries the ADR-0006 messaging; this panel states the
+  // format decision in isolation so it sits beside the still-path controls.
+  if (isAnimated) {
+    return (
+      <div className="flex flex-col gap-2" data-testid="output-format-control">
+        <p className="text-sm font-medium">Output format</p>
+        <p className="text-sm text-muted-foreground" data-testid="animated-output-label">
+          {animatedOutputIsApng
+            ? "APNG (true colour)"
+            : "GIF (256 colours — your browser lacks WebCodecs)"}
+        </p>
+        <p className="text-xs text-muted-foreground" data-testid="output-format-hint">
+          {animatedOutputIsApng
+            ? "Animated output is a true-colour APNG on this browser (WebCodecs available) — your format choice doesn't apply."
+            : "Your browser lacks WebCodecs, so animated output is a 256-colour GIF (an honest degrade; fine detail may band). Your format choice doesn't apply."}
+        </p>
+        <p className="text-xs text-muted-foreground" data-testid="heic-notice">
+          HEIC/HEIF (Apple photos) is accepted on upload and converted in your
+          browser — output is always PNG, WebP, or JPEG, never HEIC.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col gap-2" data-testid="output-format-control">
       <p className="text-sm font-medium">Output format</p>

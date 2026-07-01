@@ -67,6 +67,16 @@ test("animated WebP: detected frame count + 'animation preserved' notice", async
   // is genuinely animated and routes to processAnimated, not the still path.
   await expect(page.getByTestId("animated-webp-notice")).toHaveCount(0);
   await expect(page.getByTestId("apng-notice")).toHaveCount(0);
+
+  // Issue #29: for an animated input the output format is device-determined and
+  // the selector is read-only. Chromium has WebCodecs (ImageDecoder), so the
+  // device is on the high-fidelity branch — the label must say APNG (true
+  // colour), not GIF. The still-path PNG/WebP/JPEG cards are not rendered.
+  await expect(page.getByTestId("animated-output-label")).toContainText(/APNG/i);
+  await expect(page.getByTestId("animated-output-label")).toContainText(/true colour/i);
+  await expect(page.getByTestId("output-format-png")).toHaveCount(0);
+  await expect(page.getByTestId("output-format-webp")).toHaveCount(0);
+  await expect(page.getByTestId("output-format-jpeg")).toHaveCount(0);
 });
 
 test("animated WebP: faithful per-frame upscale → playable 4K APNG (frames + dims + timing preserved, true-colour)", async ({ page }) => {
@@ -96,12 +106,19 @@ test("animated WebP: faithful per-frame upscale → playable 4K APNG (frames + d
     timeout: 240_000,
   });
 
+  // The download button's label carries the device-determined extension (#29):
+  // APNG on this Chromium device, so it reads "… APNG" — no mismatch between
+  // the label and the bytes the run emits (ADR-0007 honest output naming).
+  await expect(page.getByTestId("download")).toContainText(/APNG/);
+
   // Download the result and capture it. On this Chromium device the output is
-  // an APNG (PNG-signatured), per ADR-0007 — whatever the download link names
-  // it, the bytes are the WebCodecs→UPNG true-colour animation.
+  // an APNG (PNG-signatured), per ADR-0007 — the label above and the bytes
+  // below agree (issue #29 AC: "format shown matches what the pipeline emits").
   const downloadPromise = page.waitForEvent("download");
   await page.getByTestId("download").click();
   const download = await downloadPromise;
+  // The suggested filename also carries the .apng extension (no .gif mismatch).
+  expect(download.suggestedFilename()).toMatch(/\.apng$/i);
   await download.saveAs(outPath);
 
   // PNG signature ⇒ the bytes are an APNG, not a GIF.
