@@ -73,7 +73,7 @@ _Avoid_: Actual mode, forced mode, resolved mode (ambiguous with the user's choi
 ### Animated images
 
 **Animated image**:
-An image file that contains a sequence of frames played in sequence to produce motion. v3 extends per-frame processing to animated WebP; animated GIF was handled in v2. APNG is supported as an *output* container only (APNG inputs are still treated as stills, first frame only).
+An image file that contains a sequence of frames played in sequence to produce motion. Per-frame processing covers animated GIF (v2) and animated WebP (v3); v4 adds APNG as both an input and output container, so all three animated formats are processed frame-by-frame.
 _Avoid_: Video, animation (too generic), movie
 
 **Frame**:
@@ -101,4 +101,18 @@ _Avoid_: GIF codec, WebP codec (format-specific; use these only when naming a sp
 **Colour fidelity**:
 Whether the animated output preserves the source's full colour depth. APNG output is true-colour (full fidelity); GIF output is quantized to 256 colours per frame (reduced fidelity, an inherent GIF limit). The WebCodecs-or-degrade decision exists to maximize colour fidelity where the device allows it.
 _Avoid_: Colour quality, colour accuracy, high colour
+
+### Enhancement control (v4)
+
+**Enhancement strength**:
+A user-facing scalar (0–100%) controlling how aggressively the AI model's output replaces the original in AI mode. Implemented as an alpha-blend ratio, not a model parameter: at 0% the output equals faithful Lanczos, at 100% it equals pure AI reconstruction, and in between the two are linearly blended per pixel. Only available for still images in AI mode; hidden for animated inputs (blending the AI-enhanced first frame against faithful subsequent frames causes visible frame-to-frame inconsistency).
+_Avoid_: AI level, model intensity, sharpen amount
+
+**Alpha blend**:
+The pixel operation behind enhancement strength: `out = α × aiUpscaled + (1 − α) × lanczosUpscaled`. A deterministic, per-pixel linear interpolation between the AI-enhanced output and the faithful upscaled output at the same resolution. Owned by the blending upscaler, which runs both upscalers and combines their results.
+_Avoid_: Mix, interpolation ratio, opacity
+
+**Blending upscaler**:
+The deep module that implements alpha blend behind a single seam. It runs the AI upscaler and the faithful upscaler on the same source, then blends their outputs at the given alpha. Invoked only when enhancement strength is below 100% (α < 1); at 100% the orchestrator calls the AI upscaler directly, skipping the redundant faithful pass.
+_Avoid_: Hybrid upscaler, mixed upscaler, dual upscaler
 

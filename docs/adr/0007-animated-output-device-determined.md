@@ -24,3 +24,11 @@ The format is not user-selectable. Letting a user on a WebCodecs-capable browser
 Gating on "can the browser encode APNG" alone (ignoring decode) would produce APNG output from wasm-decoded frames, which is technically possible but conflates two independent capabilities and complicates the deps wiring. Tying the whole path to WebCodecs (decode + the APNG-encode pair) keeps one clean capability boundary.
 
 A user toggle adds a choice with no good answer for most users (who don't know what WebCodecs or APNG are). Automatic detection with honest messaging is consistent with ADR-0002's graceful-degradation philosophy.
+
+## v4 exception: APNG inputs always output APNG
+
+v4 adds APNG as an *input* format. The device-determined rule above was premised on **WebP** input, whose *decode* genuinely gates on WebCodecs — hence APNG output was tied to WebCodecs availability. But APNG *encoding* (UPNG.js) is pure JavaScript and runs on every browser; it does not depend on WebCodecs. And APNG inputs are decoded (via WebCodecs or the pngjs fallback) into true-colour frames regardless of device.
+
+Therefore: **APNG inputs always produce APNG output (true-colour), never degraded to GIF.** The device-determined APNG-or-GIF split continues to apply to WebP inputs (whose decode gates on WebCodecs), but APNG inputs are an exception — the input format itself guarantees a true-colour-capable decode path and a universal encode path, so there is no device capability left to gate on.
+
+This is not a contradiction of the rule but a narrowing: "output is device-determined" holds when the input format's decode or the output's encode is device-gated. For APNG, neither is.
