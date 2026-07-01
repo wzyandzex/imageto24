@@ -127,15 +127,17 @@ async function decodeAnimatedWebpWithWasm(
   buffer: ArrayBuffer,
 ): Promise<DecodedAnimatedFrame[]> {
   // Lazy-load so non-WebP users never download the wasm (matches the
-  // gifuct-js / heic2any lazy-import pattern). The module specifier is routed
-  // through a variable so the bundler cannot statically resolve it (the dep is
-  // only installed where WebCodecs is absent; tests stub it via vi.mock). We
-  // target @jsquash/webp (libwebp wasm): it exposes a still `decode(buffer)`
-  // only — no mature browser wasm lib decodes animated WebP per-frame, so the
-  // fallback is honest single-frame degradation (ADR-0002), not a hard error.
-  const MODULE = "@jsquash/webp";
+  // gifuct-js / heic2any lazy-import pattern). A *plain* dynamic
+  // `import("@jsquash/webp")` — not a `@vite-ignore`/variable indirection — so
+  // Vite statically resolves it at build time and emits a separate chunk the
+  // worker fetches on first non-WebCodecs WebP decode (mirrors the GIF codec
+  // and the APNG encoder). We target @jsquash/webp (libwebp wasm): it exposes a
+  // still `decode(buffer)` only — no mature browser wasm lib decodes animated
+  // WebP per-frame, so the fallback is honest single-frame degradation
+  // (ADR-0002), not a hard error. `vi.mock("@jsquash/webp")` intercepts the
+  // runtime import in the contract tests.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mod = (await import(/* @vite-ignore */ MODULE)) as any;
+  const mod = (await import("@jsquash/webp")) as any;
   const decoder = (mod.default ?? mod) as WasmWebpStillDecoder;
   const imageData = await decoder.decode(buffer);
   // Single frame; a non-zero delay so playback (if any) isn't instantaneous

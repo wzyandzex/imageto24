@@ -63,16 +63,17 @@ export const browserAnimatedApngEncoder: AnimatedEncoderDeps = {
     }>,
     options: { width: number; height: number },
   ): Promise<ArrayBuffer> {
-    // Lazy-load so the codec never reaches a non-APNG user's bundle. The module
-    // specifier is routed through a variable + `@vite-ignore` so Vite does not
-    // try to statically resolve it at build time — `upng-js` is lazy-`import()`ed
-    // only on first APNG output, and (like `@jsquash/webp` in the WebP codec)
-    // may not be physically installed during local dev / test (npm cache was
-    // permission-blocked in this environment; the dep is added to `package.json`
-    // and installed out-of-band). `vi.mock("upng-js")` intercepts the runtime
-    // import in the contract tests.
-    const MODULE = "upng-js";
-    const mod = (await import(/* @vite-ignore */ MODULE)) as {
+    // Lazy-load so the codec never reaches a non-APNG user's bundle. A *plain*
+    // dynamic `import("upng-js")` — not a `@vite-ignore`/variable indirection —
+    // so Vite statically resolves it at build time and emits it as a separate
+    // chunk the worker fetches on first APNG output. This mirrors the GIF codec
+    // (`import("gifenc")`, `import("gifuct-js")`) and the WebP codec
+    // (`import("@jsquash/webp")`). The earlier `@vite-ignore` form leaked the
+    // bare specifier into the production worker bundle, where the browser could
+    // not resolve it (`Failed to resolve module specifier 'upng-js'`) — the
+    // tracer-bullet e2e (#28) caught this. `vi.mock("upng-js")` still
+    // intercepts the runtime import in the contract tests.
+    const mod = (await import("upng-js")) as {
       default: { encode: typeof import("upng-js").encode };
     };
     const UPNG = mod.default;

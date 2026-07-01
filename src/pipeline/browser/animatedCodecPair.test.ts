@@ -95,4 +95,27 @@ describe("resolveAnimatedCodecPair (issues #25 / #26 / #27)", () => {
     expect(gifCalls).toBe(1);
     expect(webpCalls).toBe(1);
   });
+
+  it("degrade path (webCodecs:false): WebP still routes to the WebP decoder, output to the GIF encoder (issue #28)", () => {
+    // #28 tracer bullet — the honest-degrade contract on a non-WebCodecs device.
+    // ADR-0007 + PRD-0003: a device *without* WebCodecs gets the 256-colour GIF
+    // encoder (the only honest output container there), but the *decoder* is
+    // still format-aware — an animated WebP must still reach the WebP adapter
+    // (which itself falls back to the wasm still-decode, ADR-0002), never the GIF
+    // adapter. So: encoder = GIF singleton; decoder = the same format-aware
+    // dispatcher as the high-fidelity branch (asserted above), i.e. capability
+    // changes the *encoder* only, never the decode routing.
+    const degrade = resolveAnimatedCodecPair({ webCodecs: false });
+    const highFidelity = resolveAnimatedCodecPair({ webCodecs: true });
+
+    // Output format is device-determined: GIF (256-colour) on the degrade path.
+    expect(degrade.animatedEncoder).toBe(browserAnimatedGifEncoder);
+    expect(degrade.animatedEncoder).not.toBe(highFidelity.animatedEncoder);
+
+    // Decode routing is NOT device-determined: the same format-aware dispatcher
+    // serves both branches, so a WebP buffer still reaches the WebP adapter
+    // regardless of capability. (The adapter's own ImageDecoder gate picks the
+    // wasm fallback when WebCodecs is absent — covered in animatedWebpCodec.test.)
+    expect(degrade.animatedDecoder).toBe(highFidelity.animatedDecoder);
+  });
 });

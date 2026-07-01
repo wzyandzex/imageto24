@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeGif } from "./fixtures/gif";
+import { makeGradientGif as makeAnimatedGif } from "./fixtures/animatedGradientGif";
 import { parseApng } from "./fixtures/apng";
 
 /**
@@ -37,9 +38,14 @@ const ANIMATED_GIF = join(FIXTURE_DIR, "fixtures", "animated.gif");
 const STILL_GIF = join(FIXTURE_DIR, "fixtures", "still.gif");
 
 test.beforeAll(() => {
-  // Write the fixtures once for the suite. A 3-frame animated GIF and a
-  // single-frame still GIF — both browser-decodable.
-  writeFileSync(ANIMATED_GIF, makeGif(3));
+  // Write the fixtures once for the suite. The animated GIF is a 3-frame
+  // gradient (256-colour palette, every frame a diagonal ramp) so the APNG
+  // output the worker produces on a WebCodecs device is verifiably true-colour
+  // (colour type 6) rather than palette (type 3) — a flat-colour frame would
+  // palette-encode losslessly and the colourType assertion would be meaningless.
+  // The still GIF stays at `makeGif(1)` (a 1×1 flat frame is fine for the
+  // no-animation-routing assertion, which doesn't inspect pixels).
+  writeFileSync(ANIMATED_GIF, makeAnimatedGif());
   writeFileSync(STILL_GIF, makeGif(1));
 });
 
