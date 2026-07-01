@@ -18,8 +18,8 @@ import {
 import type { DeviceCapability } from "./types";
 import type { RunOptions, SourceSize } from "./runReadiness";
 
-const OK: DeviceCapability = { webgpu: true, memBudget: 2_000_000_000 };
-const NO_GPU: DeviceCapability = { webgpu: false, memBudget: 0 };
+const OK: DeviceCapability = { webgpu: true, memBudget: 2_000_000_000, webCodecs: false };
+const NO_GPU: DeviceCapability = { webgpu: false, memBudget: 0, webCodecs: false };
 
 // A 500x500 source used by most boundary/output tests.
 const SRC_500: SourceSize = { width: 500, height: 500 };
@@ -29,7 +29,7 @@ const SRC_500: SourceSize = { width: 500, height: 500 };
 // memory-budget downgrade case — the tier is irrelevant since any tier clamps
 // to 4x, so we just need a source big enough that 4x is too costly.
 const SRC_1500: SourceSize = { width: 1500, height: 1500 };
-const MED_MEM: DeviceCapability = { webgpu: true, memBudget: 50_000_000 };
+const MED_MEM: DeviceCapability = { webgpu: true, memBudget: 50_000_000, webCodecs: false };
 
 function opts(over: Partial<RunOptions> = {}): RunOptions {
   return {

@@ -38,8 +38,13 @@ vi.mock("@/pipeline/browser/runInWorker", () => ({
   ),
 }));
 
-// Mock the browser capability probe — generous "AI available" device.
-const mockCapability = { webgpu: true, memBudget: 8_000_000_000 };
+// Mock the browser capability probe — generous "AI available" device. webCodecs
+// defaults to absent so the degrade (GIF) path is the baseline; issue #29 tests
+// flip it to exercise the APNG branch. Mirrors the worker's hasWebCodecs() gate.
+const mockCapability: { webgpu: boolean; memBudget: number; webCodecs?: boolean } = {
+  webgpu: true,
+  memBudget: 8_000_000_000,
+};
 vi.mock("@/pipeline/browser/capability", () => ({
   browserCapabilityDetector: {
     checkDeviceCapability: vi.fn(async () => ({ ...mockCapability })),
@@ -420,5 +425,66 @@ describe("animated WebP / APNG notices (issue #16/#26, PRD stories #19/#20)", ()
     await waitFor(() => expect(captured).toBeDefined());
     expect(captured!.animated).toBe(true);
     expect(captured!.format).toBe("webp");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Animated output format — device-determined, read-only (issue #29)          */
+/* -------------------------------------------------------------------------- */
+
+describe("animated output format — read-only, device-determined (issue #29)", () => {
+  it("shows the output format control as read-only for an animated GIF and states APNG on a WebCodecs device", async () => {
+    // WebCodecs-capable device: animated output is true-colour APNG.
+    mockCapability.webCodecs = true;
+
+    await renderApp();
+    await upload(buildGif(3), "clip.gif", "image/gif");
+
+    // The read-only animated label is shown (not the PNG/WebP/JPEG cards).
+    const label = screen.getByTestId("animated-output-label");
+    expect(label.textContent).toMatch(/APNG/i);
+    expect(label.textContent).toMatch(/true colour/i);
+    // The still-path format buttons are not rendered for animated input.
+    expect(screen.queryByTestId("output-format-png")).toBeNull();
+    expect(screen.queryByTestId("output-format-webp")).toBeNull();
+    expect(screen.queryByTestId("output-format-jpeg")).toBeNull();
+  });
+
+  it("states GIF (256 colours) + the WebCodecs reason on a non-WebCodecs device", async () => {
+    // Non-WebCodecs device: honest degrade to 256-colour GIF.
+    mockCapability.webCodecs = false;
+
+    await renderApp();
+    await upload(buildGif(3), "clip.gif", "image/gif");
+
+    const label = screen.getByTestId("animated-output-label");
+    expect(label.textContent).toMatch(/GIF/i);
+    expect(label.textContent).toMatch(/256/i);
+    expect(label.textContent).toMatch(/WebCodecs/i);
+  });
+
+  it("the animation-preserved notice names the device-determined output (APNG vs GIF)", async () => {
+    mockCapability.webCodecs = true;
+    await renderApp();
+    await upload(buildGif(3), "clip.gif", "image/gif");
+
+    // The source-panel notice carries the format decision too (the
+    // animated-output-format span).
+    const fmt = screen.getByTestId("animated-output-format");
+    expect(fmt.textContent).toMatch(/APNG/i);
+  });
+
+  it("keeps the format selector interactive for a still image (unchanged)", async () => {
+    mockCapability.webCodecs = true;
+
+    await renderApp();
+    await upload(buildGif(1), "clip.gif", "image/gif");
+
+    // A still image keeps the PNG/WebP/JPEG cards interactive; the read-only
+    // animated label is NOT rendered.
+    expect(screen.queryByTestId("animated-output-label")).toBeNull();
+    expect(screen.getByTestId("output-format-png")).toBeInTheDocument();
+    expect(screen.getByTestId("output-format-webp")).toBeInTheDocument();
+    expect(screen.getByTestId("output-format-jpeg")).toBeInTheDocument();
   });
 });

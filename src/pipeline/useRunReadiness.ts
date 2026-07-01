@@ -42,7 +42,9 @@ export function useRunReadiness(
       .catch(() => {
         // A probe failure must never blank the page — fall back to "no AI"
         // (ADR-0002: faithful is the universal fallback, never a hard error).
-        if (!cancelled) setCapability({ webgpu: false, memBudget: 0 });
+        // webCodecs:false here is the conservative degrade choice: if the probe
+        // can't run, don't claim APNG (true-colour) output the device can't make.
+        if (!cancelled) setCapability({ webgpu: false, memBudget: 0, webCodecs: false });
       });
     return () => {
       cancelled = true;
