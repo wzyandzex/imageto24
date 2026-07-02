@@ -21,9 +21,12 @@
  */
 import { lanczosResize, lanczosUpscale } from "../lanczos";
 import { aiUpscale } from "../aiUpscale";
+import { blendAlpha } from "../blendAlpha";
 import type {
   AiAdapterOptions,
   AiUpscalerDeps,
+  BlendingUpscaleOptions,
+  BlendingUpscalerDeps,
   FaithfulUpscaleOptions,
   FaithfulUpscalerDeps,
   ImageData,
@@ -73,3 +76,41 @@ export const aiUpscaler: AiUpscalerDeps = {
     });
   },
 };
+
+/**
+ * Build a blending upscaler (v4, ADR-0008) that composes the AI and faithful
+ * upscalers. It runs both on the same source — forwarding the same `factor`,
+ * `model`, and `exactTargetSize` so their outputs land at an identical
+ * resolution — then per-pixel blends them: `out = α × ai + (1 − α) × faithful`.
+ *
+ * The orchestrator calls this only when enhancement strength is below 100%
+ * (α < 1); at α = 1 it calls {@link aiUpscaler} directly, skipping the redundant
+ * faithful pass (ADR-0008). The blend math itself is delegated to the pure,
+ * fully-tested {@link blendAlpha} so this adapter stays a thin composition.
+ *
+ * Factory form (rather than a singleton) because the two inner upscalers are
+ * its dependencies — injected the same way the pipeline injects every other
+ * environment-bound concern. The browser wiring passes the two singleton
+ * adapters above; tests pass stubs.
+ */
+export function createBlendingUpscaler(deps: {
+  aiUpscaler: AiUpscalerDeps;
+  faithfulUpscaler: FaithfulUpscalerDeps;
+}): BlendingUpscalerDeps {
+  return {
+    async upscale(
+      image: ImageData,
+      options: BlendingUpscaleOptions,
+    ): Promise<ImageData> {
+      const common = {
+        factor: options.factor,
+        exactTargetSize: options.exactTargetSize,
+      };
+      const [aiOut, faithfulOut] = await Promise.all([
+        deps.aiUpscaler.upscale(image, { ...common, model: options.model }),
+        deps.faithfulUpscaler.upscale(image, common),
+      ]);
+      return blendAlpha(aiOut, faithfulOut, options.alpha);
+    },
+  };
+}

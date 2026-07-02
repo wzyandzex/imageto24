@@ -9,7 +9,7 @@
 import { browserCapabilityDetector } from "./capability";
 import { browserDecoder } from "./canvasCodec";
 import { browserEncoderWithSource } from "./canvasCodec";
-import { aiUpscaler, faithfulUpscaler } from "./upscaler";
+import { aiUpscaler, createBlendingUpscaler, faithfulUpscaler } from "./upscaler";
 import { loadRealEsrganModel } from "./modelLoader";
 import { resolveAnimatedCodecPair } from "./animatedCodecPair";
 import type { ModelLoaderDeps, PipelineDeps } from "../types";
@@ -33,11 +33,16 @@ const browserModelLoader: ModelLoaderDeps = {
  *   EXIF. Undefined when there is no source to copy metadata from.
  */
 export function browserPipelineDeps(sourceBytes: ArrayBuffer | undefined): PipelineDeps {
+  // Blending upscaler (v4, ADR-0008): composes the AI and faithful upscalers
+  // behind one seam. Built once per run from the two singleton adapters above;
+  // the orchestrator reaches for it only when enhancement strength < 100%.
+  const blendingUpscaler = createBlendingUpscaler({ aiUpscaler, faithfulUpscaler });
   return {
     decoder: browserDecoder,
     encoder: browserEncoderWithSource(sourceBytes),
     faithfulUpscaler,
     aiUpscaler,
+    blendingUpscaler,
     modelLoader: browserModelLoader,
     capability: browserCapabilityDetector,
     // Animated codec pair (v3 #25): detected per-call from WebCodecs availability.

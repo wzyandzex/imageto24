@@ -266,6 +266,38 @@ export interface AiAdapterOptions {
 }
 
 /**
+ * The blending upscaler seam (v4, ADR-0008). Implements enhancement strength as a
+ * per-pixel alpha blend of the AI and faithful upscaled outputs, composing the two
+ * existing seams (from #3) rather than forking them. The same `factor`, `model`,
+ * and `exactTargetSize` are forwarded to both inner upscalers so their outputs land
+ * at an identical resolution before blending.
+ *
+ * Invoked by the orchestrator only when enhancement strength is below 100% (α < 1);
+ * at α = 1 the orchestrator calls {@link AiUpscalerDeps} directly, skipping the
+ * redundant faithful pass. See CONTEXT.md "Blending upscaler".
+ */
+export interface BlendingUpscalerDeps {
+  upscale(imageData: ImageData, options: BlendingUpscaleOptions): Promise<ImageData>;
+}
+
+/** Options for {@link BlendingUpscalerDeps.upscale}. */
+export interface BlendingUpscaleOptions {
+  readonly factor: UpscaleFactor;
+  readonly model: AiModel;
+  /**
+   * The blend ratio α ∈ [0,1]: `out = α × aiUpscaled + (1 − α) × lanczosUpscaled`.
+   * α = 0 yields the faithful output, α = 1 the AI output. See ADR-0008.
+   */
+  readonly alpha: number;
+  /**
+   * When set, forwarded to both inner upscalers so their native integer outputs
+   * are adjusted to exactly these dimensions before blending. Absent for the
+   * explicit-factor path.
+   */
+  readonly exactTargetSize?: ExactTargetSize;
+}
+
+/**
  * Progress reporting for a lazy model load. Fires when a model download starts,
  * repeatedly as bytes stream in, and once when the load is ready. The orchestrator
  * does not interpret the values — it forwards them to its own caller (the UI)
@@ -393,6 +425,16 @@ export interface PipelineDeps {
   readonly encoder: EncoderDeps;
   readonly faithfulUpscaler: FaithfulUpscalerDeps;
   readonly aiUpscaler: AiUpscalerDeps;
+  /**
+   * The blending upscaler (v4, ADR-0008). Composes {@link AiUpscalerDeps} and
+   * {@link FaithfulUpscalerDeps} into a per-pixel alpha blend behind one seam.
+   * `processImage` calls it only when AI mode is selected with enhancement
+   * strength below 100% (α < 1); at α = 1 it calls {@link aiUpscaler} directly,
+   * skipping the redundant faithful pass. Optional on the bundle so the existing
+   * still-path tests continue to build without it — the orchestrator throws
+   * loudly if it is absent when a blend is actually requested (wiring in #40).
+   */
+  readonly blendingUpscaler?: BlendingUpscalerDeps;
   readonly modelLoader: ModelLoaderDeps;
   readonly capability: CapabilityDetector;
   /**
