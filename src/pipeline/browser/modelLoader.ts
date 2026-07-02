@@ -47,6 +47,30 @@ async function importOrt(preferWebGpu: boolean): Promise<typeof OrtNS> {
 }
 
 /**
+ * Configure ORT's WASM runtime before session creation (issue #45).
+ *
+ * - `wasmPaths`: ORT fetches its `.wasm` + JS-glue by URL at runtime. We serve
+ *   them same-origin from `/ort/` (copied there by `scripts/copy-ort-wasm.mjs`),
+ *   which both avoids a production 404 on the default relative path and keeps the
+ *   assets clear of the `COEP: require-corp` cross-origin restriction (a CDN copy
+ *   would need CORP/CORS). This matters for the WebGPU (jsep) bundle too, which
+ *   still loads WASM for fallback ops.
+ * - `numThreads`: multi-threaded WASM needs `SharedArrayBuffer`, which only exists
+ *   under cross-origin isolation (the COOP/COEP headers in `public/_headers`).
+ *   When isolated we use up to 4 cores; otherwise we pin to 1 so ORT doesn't try
+ *   to spawn threads it can't back with SAB. SIMD is always on in 1.21's single
+ *   threaded/SIMD wasm build, so there is no separate flag to set.
+ */
+function configureOrtWasm(ort: typeof OrtNS): void {
+  ort.env.wasm.wasmPaths = "/ort/";
+
+  const g = globalThis as { crossOriginIsolated?: boolean; navigator?: Navigator };
+  const isolated = g.crossOriginIsolated === true;
+  const cores = g.navigator?.hardwareConcurrency ?? 4;
+  ort.env.wasm.numThreads = isolated ? Math.min(cores, 4) : 1;
+}
+
+/**
  * Stream a Response body, reporting progress. Returns the full ArrayBuffer.
  * Falls back to a plain `arrayBuffer()` when the response has no streaming body
  * or no Content-Length (progress then simply never fires the byte ticks — the
@@ -155,6 +179,7 @@ export async function loadRealEsrganModel(
   }
 
   const ort = await importOrt(useWebGpu);
+  configureOrtWasm(ort);
 
   const session = await ort.InferenceSession.create(bytes, {
     // Match the imported bundle: the WebGPU bundle exposes the WebGPU EP,
