@@ -1,0 +1,15 @@
+# Cloudflare Pages headers.
+#
+# Cross-origin isolation enables SharedArrayBuffer, which ONNX Runtime Web's
+# WASM execution provider needs for multi-threaded inference (issue #45). Without
+# these headers the WASM AI fallback (no-WebGPU devices) runs single-threaded and
+# is much slower.
+#
+# COEP: require-corp means every cross-origin subresource must opt in via CORP or
+# CORS. The AI model is fetched from R2 with `mode: "cors"`, so the R2 bucket must
+# return `Access-Control-Allow-Origin` (or `Cross-Origin-Resource-Policy:
+# cross-origin`). The ORT wasm/glue assets are served same-origin from /ort/, so
+# they are unaffected.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
