@@ -19,10 +19,16 @@ const BYTES_PER_PIXEL = 4;
 
 /**
  * A coarse upper bound on the memory an AI run will consume: the source pixel
- * buffer plus the upscaled output pixel buffer, both at 4 bytes/pixel. Real-ESRGAN
- * inference touches both buffers and allocates intermediates, so this is a floor,
- * not a precise figure — it only needs to be good enough to gate AI mode against
- * devices that clearly cannot fit the work.
+ * buffer plus the upscaled output pixel buffer, both at 4 bytes/pixel.
+ *
+ * These two buffers must exist for the whole run regardless of how inference is
+ * executed. The other term — Real-ESRGAN's activation tensors — used to scale
+ * with the *whole image* and was the real OOM risk, but tiled inference (issue
+ * #44, {@link aiUpscale}) now bounds the per-inference working set to a single
+ * (padded) tile, a fixed constant independent of image size. So this buffer-based
+ * figure is a fair estimate of the size-dependent peak rather than an optimistic
+ * floor, and the gate no longer needs to refuse large images purely to avoid an
+ * unbounded single-shot activation allocation.
  *
  * @param srcPixels   the source image's pixel count (width × height).
  * @param factor      the integer upscale factor the AI model operates at. A
