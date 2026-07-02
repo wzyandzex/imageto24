@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
-import { processImageInWorker } from "@/pipeline/browser/runInWorker";
+import { createBatchWorkerSession } from "@/pipeline/browser/runInWorker";
 import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import {
   outputExtension,
@@ -138,76 +138,86 @@ export function BatchPanel({ options }: BatchPanelProps) {
         format: r.format,
       }));
 
-      const final = await runBatch(
-        items,
-        (item) => {
-          // A file whose format we could not resolve never enters the worker:
-          // reject here so the item is recorded as failed with an honest reason
-          // (per-item resilience, PRD #27).
-          const row = rows.find((r) => r.id === item.id);
-          if (row?.formatError) throw new Error(row.formatError);
-          // processItem: a fresh worker per image (matches the single-image
-          // path). The worker is terminated on resolve/reject, fully releasing
-          // that image's memory before the next item starts.
-          return processImageInWorker(
-            {
-              source: item.buffer,
-              format: item.format,
-              options: {
-                mode: options.mode,
-                target: options.target,
-                outputFormat: options.outputFormat,
-                lossless: options.lossless,
-                preserveExif: options.preserveExif,
-                contentType:
-                  options.mode === "ai" && options.contentTypeOverride !== "auto"
-                    ? options.contentTypeOverride
-                    : undefined,
+      // One persistent worker for the whole batch (issue #46): the compiled ONNX
+      // session stays warm and is reused across images instead of recompiling per
+      // image. Serial execution is unchanged — runBatch awaits each item and the
+      // session is single-flight — so only one image is ever in flight (ADR-0001).
+      const workerSession = createBatchWorkerSession();
+      try {
+        const final = await runBatch(
+          items,
+          (item) => {
+            // A file whose format we could not resolve never enters the worker:
+            // reject here so the item is recorded as failed with an honest reason
+            // (per-item resilience, PRD #27).
+            const row = rows.find((r) => r.id === item.id);
+            if (row?.formatError) throw new Error(row.formatError);
+            // Reuse the batch's persistent worker (and its warm session). The
+            // worker is disposed once, after the whole batch, in `finally`.
+            return workerSession.process(
+              {
+                source: item.buffer,
+                format: item.format,
+                options: {
+                  mode: options.mode,
+                  target: options.target,
+                  outputFormat: options.outputFormat,
+                  lossless: options.lossless,
+                  preserveExif: options.preserveExif,
+                  contentType:
+                    options.mode === "ai" && options.contentTypeOverride !== "auto"
+                      ? options.contentTypeOverride
+                      : undefined,
+                },
               },
-            },
-            {
-              onModelProgress: (p) =>
-                setState((s) => (s ? { ...s, modelProgress: p } : s)),
-              // Forward the HEIC-converting decode progress for batch items too
-              // (issue #17): the worker posts it before each HEIC transcode, so
-              // the batch UI shows the converter at work the same way the
-              // single-image path does (PRD HEIC story #5).
-              onDecodeProgress: (p) =>
-                setState((s) => (s ? { ...s, decodeProgress: p } : s)),
-            },
-          );
-        },
-        // onProgress: fold the new snapshot together with the accumulated URLs.
-        (p) => {
-          setState((prev) => {
-            const urls = prev?.urls ?? new Map<string, string>();
-            // Materialize object URLs for any item that just finished. Done
-            // once here (not in render) so URLs are stable across re-renders.
-            for (const it of p.items) {
-              if (it.status === "done" && it.result && !urls.has(it.id)) {
-                const blob = new Blob([it.result.buffer], {
-                  type: outputMime(options.outputFormat),
-                });
-                urls.set(it.id, URL.createObjectURL(blob));
+              {
+                onModelProgress: (p) =>
+                  setState((s) => (s ? { ...s, modelProgress: p } : s)),
+                // Forward the HEIC-converting decode progress for batch items too
+                // (issue #17): the worker posts it before each HEIC transcode, so
+                // the batch UI shows the converter at work the same way the
+                // single-image path does (PRD HEIC story #5).
+                onDecodeProgress: (p) =>
+                  setState((s) => (s ? { ...s, decodeProgress: p } : s)),
+              },
+            );
+          },
+          // onProgress: fold the new snapshot together with the accumulated URLs.
+          (p) => {
+            setState((prev) => {
+              const urls = prev?.urls ?? new Map<string, string>();
+              // Materialize object URLs for any item that just finished. Done
+              // once here (not in render) so URLs are stable across re-renders.
+              for (const it of p.items) {
+                if (it.status === "done" && it.result && !urls.has(it.id)) {
+                  const blob = new Blob([it.result.buffer], {
+                    type: outputMime(options.outputFormat),
+                  });
+                  urls.set(it.id, URL.createObjectURL(blob));
+                }
               }
-            }
-            return {
-              progress: p,
-              urls,
-              modelProgress: prev?.modelProgress ?? null,
-              decodeProgress: prev?.decodeProgress ?? null,
-            };
-          });
-        },
-      );
+              return {
+                progress: p,
+                urls,
+                modelProgress: prev?.modelProgress ?? null,
+                decodeProgress: prev?.decodeProgress ?? null,
+              };
+            });
+          },
+        );
 
-      // Mark running false; keep the final snapshot + urls visible for download.
-      setState((prev) =>
-        prev
-          ? { ...prev, progress: final, modelProgress: null, decodeProgress: null }
-          : prev,
-      );
-      setRunning(false);
+        // Keep the final snapshot + urls visible for download.
+        setState((prev) =>
+          prev
+            ? { ...prev, progress: final, modelProgress: null, decodeProgress: null }
+            : prev,
+        );
+      } finally {
+        // Always tear down the worker (and its session) — on success or error —
+        // so a batch never leaks a worker.
+        workerSession.dispose();
+        setRunning(false);
+      }
     },
     [options],
   );
