@@ -47,3 +47,6 @@ build/
 
 # ---- Cloudflare ----
 .wrangler/
+
+# ---- ONNX Runtime Web assets (copied from node_modules by scripts/copy-ort-wasm.mjs) ----
+/public/ort/

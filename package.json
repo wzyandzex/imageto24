@@ -6,8 +6,9 @@
   "description": "A browser-based image upscaler. Free, open-source, privacy-first — no image bytes ever leave your device.",
   "license": "MIT",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "copy:ort": "node scripts/copy-ort-wasm.mjs",
+    "dev": "npm run copy:ort && vite",
+    "build": "npm run copy:ort && tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "test": "vitest run",
