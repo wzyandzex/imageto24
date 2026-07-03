@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampIndex,
   dimsForLongEdge,
+  isFullyOpaque,
   lanczosKernel,
   lanczosResize,
   lanczosUpscale,
@@ -194,5 +195,49 @@ describe("dimsForLongEdge", () => {
     expect(Math.max(width, height)).toBe(3840);
     expect(width).toBe(2160);
     expect(height).toBe(3840);
+  });
+});
+
+describe("isFullyOpaque", () => {
+  it("is true when every alpha byte is 255", () => {
+    expect(isFullyOpaque(solidColor(3, 3, 10, 20, 30, 255).data)).toBe(true);
+  });
+
+  it("is false when any pixel is not fully opaque", () => {
+    const img = solidColor(3, 3, 10, 20, 30, 255);
+    img.data[7] = 128; // second pixel's alpha
+    expect(isFullyOpaque(img.data)).toBe(false);
+  });
+});
+
+describe("alpha handling (issue #47 opaque fast path)", () => {
+  it("opaque source: every output alpha is exactly 255 (fast path)", () => {
+    const out = lanczosUpscale(checkerboard(6, 6, 2), 3);
+    for (let i = 3; i < out.data.length; i += 4) {
+      expect(out.data[i]).toBe(255);
+    }
+  });
+
+  it("transparent source: alpha is resampled, not forced to 255", () => {
+    // A horizontal alpha ramp across 4 columns; opaque RGB.
+    const src: ImageData = {
+      width: 4,
+      height: 1,
+      data: new Uint8ClampedArray([
+        255, 0, 0, 0, //
+        255, 0, 0, 85, //
+        255, 0, 0, 170, //
+        255, 0, 0, 255, //
+      ]),
+    };
+    const out = lanczosResize(src, 8, 1);
+    let sawPartial = false;
+    for (let i = 3; i < out.data.length; i += 4) {
+      if (out.data[i] !== 255 && out.data[i] !== 0) sawPartial = true;
+    }
+    expect(sawPartial).toBe(true);
+    // Determinism holds on the alpha path too.
+    const again = lanczosResize(src, 8, 1);
+    expect(out.data).toEqual(again.data);
   });
 });

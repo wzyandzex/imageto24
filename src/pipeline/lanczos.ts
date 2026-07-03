@@ -9,9 +9,19 @@
  * slice's testing moat (PRD testing decisions, issue #4).
  *
  * This module is environment-free: it operates only on {@link ImageData} and
- * numbers. The pixel loop is the one hot path; we keep it allocation-light and
- * free of any global or async access so it runs identically in Node (Vitest) and
- * in the browser.
+ * numbers. The pixel loop is the one hot path, so it is written for cache
+ * locality and minimal allocation (issue #47):
+ *   - Separable two-pass resample (X then Y), the standard O(n·taps) decomposition.
+ *   - All colour channels are resampled in a *single* tap loop per output pixel,
+ *     so each tap's index/weight is read once (not once per channel) and the
+ *     source row stays hot in cache.
+ *   - Fully-opaque sources skip the alpha channel entirely and write 255 directly
+ *     — no image the pipeline produces carries transparency in practice, so this
+ *     removes ~25% of the work on the common path while staying exact for the
+ *     rare image that does have an alpha ramp.
+ *   - The intermediate (inter-pass) buffer is Float32: the output is 8-bit, so
+ *     single precision is more than enough and halves that buffer's memory
+ *     bandwidth. The precomputed weights stay Float64 for a tight sum-to-one.
  */
 import type { ImageData, UpscaleFactor } from "./types";
 
@@ -68,13 +78,17 @@ export function precomputeAxis(srcSize: number, dstSize: number, a: number = LAN
   const indices = new Int32Array(dstSize * taps);
   const weights = new Float64Array(dstSize * taps);
 
+  // Scratch buffer for one output pixel's raw (pre-normalisation) weights. Hoisted
+  // out of the loop below so we allocate once per axis, not once per output pixel
+  // (issue #47) — thousands of tiny allocations at a 4K long edge otherwise.
+  const tmpW = new Float64Array(taps);
+
   for (let o = 0; o < dstSize; o++) {
     // Centre of output pixel o in source coordinates.
     const centre = (o + 0.5) * scale - 0.5;
     const left = Math.floor(centre - support) + 1;
     // Accumulate weights so the taps sum to 1.
     let weightSum = 0;
-    const tmpW = new Float64Array(taps);
     for (let t = 0; t < taps; t++) {
       const srcIndex = left + t;
       // Divide the kernel argument by filterScale when downscaling (standard
@@ -96,60 +110,126 @@ export function precomputeAxis(srcSize: number, dstSize: number, a: number = LAN
 }
 
 /**
- * Resample a single channel plane along the X axis using precomputed taps.
- * Pure: depends only on its arguments.
+ * Is every pixel fully opaque (alpha === 255)? Fully-opaque sources take the
+ * fast path that skips resampling the alpha channel and writes 255 directly.
+ * Pure; reads only the alpha bytes.
+ */
+export function isFullyOpaque(data: Uint8ClampedArray): boolean {
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] !== 255) return false;
+  }
+  return true;
+}
+
+/**
+ * X-axis pass: resample `src` (RGBA) horizontally into an interleaved RGBA
+ * Float32 intermediate of size (dstW × srcH). All resampled channels are
+ * accumulated in one tap loop so each tap index/weight is read once.
+ *
+ * @param withAlpha when false the alpha channel is not resampled (left 0 in the
+ *   intermediate); the Y pass writes a constant 255 for opaque images.
  */
 function resampleAxisX(
-  src: Uint8ClampedArray | Float64Array,
+  src: Uint8ClampedArray,
   srcW: number,
   srcH: number,
-  channel: number, // 0..3 offset into RGBA stride
   taps: AxisTaps,
-): Float64Array {
+  withAlpha: boolean,
+): Float32Array {
   const dstW = taps.outSize;
-  const out = new Float64Array(dstW * srcH);
   const nTaps = taps.taps;
+  const out = new Float32Array(dstW * srcH * 4);
   for (let y = 0; y < srcH; y++) {
     const rowBase = y * srcW * 4;
+    const outRow = y * dstW * 4;
     for (let x = 0; x < dstW; x++) {
       const tapBase = x * nTaps;
-      let acc = 0;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let alpha = 0;
       for (let t = 0; t < nTaps; t++) {
-        const srcIdx = taps.indices[tapBase + t];
         const w = taps.weights[tapBase + t];
-        acc += src[rowBase + srcIdx * 4 + channel] * w;
+        const p = rowBase + taps.indices[tapBase + t] * 4;
+        r += src[p] * w;
+        g += src[p + 1] * w;
+        b += src[p + 2] * w;
+        if (withAlpha) alpha += src[p + 3] * w;
       }
-      out[y * dstW + x] = acc;
+      const o = outRow + x * 4;
+      out[o] = r;
+      out[o + 1] = g;
+      out[o + 2] = b;
+      out[o + 3] = alpha;
     }
   }
   return out;
 }
 
 /**
- * Resample along the Y axis from an intermediate X-pass result.
- * Pure: depends only on its arguments.
+ * Y-axis pass: resample the interleaved RGBA Float32 intermediate vertically and
+ * write the final RGBA `Uint8ClampedArray` (which clamps to [0,255] on store).
+ * All channels accumulate in one tap loop.
+ *
+ * @param withAlpha when false a constant 255 is written for alpha (opaque fast
+ *   path); when true the resampled alpha is stored.
  */
 function resampleAxisY(
-  inter: Float64Array,
+  inter: Float32Array,
   interW: number,
-  tapsY: AxisTaps,
-): Float64Array {
-  const dstH = tapsY.outSize;
-  const out = new Float64Array(interW * dstH);
-  const nTaps = tapsY.taps;
+  taps: AxisTaps,
+  withAlpha: boolean,
+): Uint8ClampedArray {
+  const dstH = taps.outSize;
+  const nTaps = taps.taps;
+  const out = new Uint8ClampedArray(interW * dstH * 4);
   for (let y = 0; y < dstH; y++) {
     const tapBase = y * nTaps;
+    const outRow = y * interW * 4;
     for (let x = 0; x < interW; x++) {
-      let acc = 0;
+      const colBase = x * 4;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let alpha = 0;
       for (let t = 0; t < nTaps; t++) {
-        const srcIdx = tapsY.indices[tapBase + t];
-        const w = tapsY.weights[tapBase + t];
-        acc += inter[srcIdx * interW + x] * w;
+        const w = taps.weights[tapBase + t];
+        const p = taps.indices[tapBase + t] * interW * 4 + colBase;
+        r += inter[p] * w;
+        g += inter[p + 1] * w;
+        b += inter[p + 2] * w;
+        if (withAlpha) alpha += inter[p + 3] * w;
       }
-      out[y * interW + x] = acc;
+      const o = outRow + colBase;
+      out[o] = r;
+      out[o + 1] = g;
+      out[o + 2] = b;
+      out[o + 3] = withAlpha ? alpha : 255;
     }
   }
   return out;
+}
+
+/**
+ * Core separable resample from a source to an explicit (dstW × dstH), shared by
+ * {@link lanczosUpscale} and {@link lanczosResize}. Opaque sources skip the alpha
+ * channel; the result is deterministic — the taps depend only on the sizes, and
+ * the pixel loop is a fixed weighted sum.
+ */
+function resampleTo(src: ImageData, dstW: number, dstH: number, a: number): ImageData {
+  const srcW = src.width;
+  const srcH = src.height;
+
+  const tapsX = precomputeAxis(srcW, dstW, a);
+  const tapsY = precomputeAxis(srcH, dstH, a);
+
+  const withAlpha = !isFullyOpaque(src.data);
+
+  // X pass: src → interleaved intermediate (dstW × srcH), then Y pass → final.
+  const inter = resampleAxisX(src.data, srcW, srcH, tapsX, withAlpha);
+  const data = resampleAxisY(inter, dstW, tapsY, withAlpha);
+
+  return { width: dstW, height: dstH, data };
 }
 
 /**
@@ -168,27 +248,7 @@ export function lanczosUpscale(
   factor: UpscaleFactor,
   a: number = LANCZOS_A,
 ): ImageData {
-  const srcW = src.width;
-  const srcH = src.height;
-  const dstW = srcW * factor;
-  const dstH = srcH * factor;
-
-  const tapsX = precomputeAxis(srcW, dstW, a);
-  const tapsY = precomputeAxis(srcH, dstH, a);
-
-  const out = new Uint8ClampedArray(dstW * dstH * 4);
-
-  for (let c = 0; c < 4; c++) {
-    // X pass: src → intermediate (dstW × srcH).
-    const inter = resampleAxisX(src.data, srcW, srcH, c, tapsX);
-    // Y pass: intermediate → final (dstW × dstH).
-    const final = resampleAxisY(inter, dstW, tapsY);
-    for (let i = 0; i < final.length; i++) {
-      out[i * 4 + c] = final[i];
-    }
-  }
-
-  return { width: dstW, height: dstH, data: out };
+  return resampleTo(src, src.width * factor, src.height * factor, a);
 }
 
 /**
@@ -204,23 +264,7 @@ export function lanczosResize(
   dstH: number,
   a: number = LANCZOS_A,
 ): ImageData {
-  const srcW = src.width;
-  const srcH = src.height;
-
-  const tapsX = precomputeAxis(srcW, dstW, a);
-  const tapsY = precomputeAxis(srcH, dstH, a);
-
-  const out = new Uint8ClampedArray(dstW * dstH * 4);
-
-  for (let c = 0; c < 4; c++) {
-    const inter = resampleAxisX(src.data, srcW, srcH, c, tapsX);
-    const final = resampleAxisY(inter, dstW, tapsY);
-    for (let i = 0; i < final.length; i++) {
-      out[i * 4 + c] = final[i];
-    }
-  }
-
-  return { width: dstW, height: dstH, data: out };
+  return resampleTo(src, dstW, dstH, a);
 }
 
 /**
