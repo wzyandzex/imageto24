@@ -18,4 +18,35 @@ export default defineConfig({
     // (WebGPU-capable = evergreen).
     format: "es",
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Explicit chunking so the initial payload stays small and vendor code
+        // caches independently of app code (issue #43).
+        //
+        // The heavy pipeline deps — onnxruntime-web (~1MB of JS bundles) and
+        // heic2any (~1.3MB) — are already isolated: both are dynamically
+        // imported inside the Web Worker (`modelLoader.ts` / `canvasCodec.ts`),
+        // so Rollup already emits them as their own lazily-loaded chunks that
+        // never touch the entry. Faithful mode never imports ORT; non-HEIC input
+        // never imports heic2any. We keep the guards here anyway so the split is
+        // guaranteed rather than incidental.
+        //
+        // The concrete win in the *main* graph is pulling React out of the app
+        // entry into a stable `react-vendor` chunk: it changes rarely, so a hash
+        // that outlives app edits keeps it cached across deploys.
+        manualChunks(id: string) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("onnxruntime-web")) return "onnxruntime";
+          if (id.includes("heic2any")) return "heic2any";
+          // Match only the React runtime packages, not every "*react*" dep
+          // (e.g. lucide-react, @radix-ui/react-slot stay with the app).
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) {
+            return "react-vendor";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
 });
