@@ -934,19 +934,29 @@ function SettingsControls({
         </div>
       )}
 
-      {/* Enhancement strength (ADR-0008, issue #40): an AI-only slider that
+      {/* Enhancement strength (ADR-0008, issue #40/#41): an AI-only slider that
           controls the alpha blend between the AI reconstruction and the faithful
           Lanczos output. At 100% (default) the run is byte-identical to v1–v3;
           below 100% the blending upscaler (#38) composes the two outputs. The
           control is shown only for AI mode + still images — animated inputs hide
-          it (blending the AI first frame against faithful subsequent frames
-          causes visible frame-to-frame inconsistency; ADR-0008). The animated-
-          input messaging is #41's slice; here we only hide the control. */}
+          it. When AI mode is selected with an animated source, an honest message
+          states why (ADR-0008: blending the AI first frame against faithful
+          subsequent frames causes visible frame-to-frame inconsistency), rather
+          than silently omitting the control. Animated AI first-frame enhancement
+          stays at α = 1 (pure AI) — see runUpscale. */}
       {mode === "ai" && !isAnimated && (
         <EnhancementStrengthControl
           enhancementStrength={enhancementStrength}
           setEnhancementStrength={setEnhancementStrength}
         />
+      )}
+      {mode === "ai" && isAnimated && (
+        <p className="text-xs text-muted-foreground" data-testid="enhancement-strength-unavailable">
+          Enhancement strength is available for still images only. Blending the
+          AI-enhanced first frame against faithfully upscaled later frames would
+          make the first frame visibly different — so AI mode enhances the first
+          frame at full strength and the rest faithfully.
+        </p>
       )}
 
       {/* Output format selector (issue #10). PNG / WebP / JPEG. Faithful mode
