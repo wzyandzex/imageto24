@@ -393,6 +393,14 @@ export interface ProcessImageOptions {
   readonly lossless: boolean;
   readonly preserveExif: boolean;
   readonly contentType?: ContentType;
+  /**
+   * Enhancement strength as the alpha blend ratio α ∈ [0,1] (v4, ADR-0008).
+   * AI-mode only: α = 1 (the default) runs the AI upscaler directly; α < 1 runs
+   * the {@link BlendingUpscalerDeps}, blending the AI and faithful outputs so the
+   * result keeps more of the original's texture. The UI surfaces this as a 0–100%
+   * slider; absent ⇒ 1 (existing behaviour unchanged). Ignored in faithful mode.
+   */
+  readonly alpha?: number;
 }
 
 /** Metadata returned alongside the processed buffer. */
