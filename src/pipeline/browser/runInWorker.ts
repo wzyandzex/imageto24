@@ -1,8 +1,17 @@
 /**
  * Run the pipeline in a Web Worker so the main thread stays responsive.
  *
- * The worker is created lazily per run and terminated afterwards; this slice
- * processes one image at a time, so there's no need for a persistent pool.
+ * Two entry points share one worker implementation:
+ *
+ * - {@link processImageInWorker} — the single-image path. Spins up a worker,
+ *   processes one image, and terminates it. One image, one worker.
+ * - {@link createBatchWorkerSession} — the batch path (issue #46). Keeps ONE
+ *   worker alive across many images so the compiled ONNX `InferenceSession`
+ *   (memoized in the worker's `deps.ts`) stays warm and is reused, instead of
+ *   recompiling the graph per image. Images are still processed strictly serially
+ *   (the ADR-0001 one-image-in-flight memory guarantee is unchanged — this reuses
+ *   the session, it does NOT add concurrency).
+ *
  * Vite's `?worker` suffix bundles {@link ./processWorker} as a separate chunk.
  */
 import ProcessWorker from "./processWorker?worker";
@@ -74,43 +83,114 @@ export interface ProcessImageInWorkerOptions {
 }
 
 /**
+ * A persistent worker that processes images serially while keeping the compiled
+ * ONNX session warm across calls (issue #46).
+ *
+ * Call {@link BatchWorkerSession.process} once per image, awaiting each before
+ * the next (the session is single-flight — a `process` call while another is in
+ * flight rejects). Call {@link BatchWorkerSession.dispose} when the batch is done
+ * (or cancelled) to terminate the worker and free its session.
+ */
+export interface BatchWorkerSession {
+  process(
+    input: RunInWorkerInput,
+    opts?: ProcessImageInWorkerOptions,
+  ): Promise<ProcessImageResult>;
+  dispose(): void;
+}
+
+interface InFlight {
+  opts: ProcessImageInWorkerOptions;
+  resolve: (r: ProcessImageResult) => void;
+  reject: (e: Error) => void;
+}
+
+/**
+ * Create a persistent batch worker session. The worker lives until
+ * {@link BatchWorkerSession.dispose}; each {@link BatchWorkerSession.process}
+ * reuses it (and thus the memoized `InferenceSession`).
+ *
+ * Serial by contract: at most one image is in flight. Because callers await each
+ * `process` before the next, a single in-flight slot is all that's needed, and it
+ * preserves the one-image-in-flight memory guarantee (ADR-0001).
+ */
+export function createBatchWorkerSession(): BatchWorkerSession {
+  const worker = new ProcessWorker();
+  let current: InFlight | null = null;
+  let disposed = false;
+
+  worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
+    const { data } = e;
+    if (!current) return; // stray message after settle — ignore
+    if (data.type === "progress") {
+      current.opts.onModelProgress?.(data.progress);
+      return;
+    }
+    if (data.type === "decode-progress") {
+      current.opts.onDecodeProgress?.({ phase: data.phase });
+      return;
+    }
+    if (data.type === "frame-progress") {
+      current.opts.onFrameProgress?.({ current: data.current, total: data.total });
+      return;
+    }
+    // data.type === "result" — terminal for this image; free the slot first so a
+    // resolve handler may immediately queue the next image.
+    const settled = current;
+    current = null;
+    if (data.ok) {
+      settled.resolve(data.result);
+    } else {
+      settled.reject(new Error(data.error ?? "Worker failed without an error message"));
+    }
+  };
+
+  worker.onerror = (e) => {
+    const settled = current;
+    current = null;
+    settled?.reject(new Error(e.message || "Worker failed to load"));
+  };
+
+  return {
+    process(input, opts = {}) {
+      if (disposed) {
+        return Promise.reject(new Error("BatchWorkerSession has been disposed"));
+      }
+      if (current) {
+        return Promise.reject(
+          new Error("BatchWorkerSession is busy; process() calls must be awaited serially"),
+        );
+      }
+      return new Promise<ProcessImageResult>((resolve, reject) => {
+        current = { opts, resolve, reject };
+        // Transfer the source buffer to avoid copying large image bytes.
+        worker.postMessage(input, [input.source]);
+      });
+    },
+    dispose() {
+      disposed = true;
+      current = null;
+      worker.terminate();
+    },
+  };
+}
+
+/**
  * Process a single image off the main thread. Resolves with the pipeline
  * result, or rejects with the worker's error message.
+ *
+ * Implemented on top of {@link createBatchWorkerSession}: create a one-shot
+ * session, process the image, and dispose the worker — identical to the previous
+ * "one image, one worker" behaviour.
  */
-export function processImageInWorker(
+export async function processImageInWorker(
   input: RunInWorkerInput,
   opts: ProcessImageInWorkerOptions = {},
 ): Promise<ProcessImageResult> {
-  return new Promise((resolve, reject) => {
-    const worker = new ProcessWorker();
-    worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
-      const { data } = e;
-      if (data.type === "progress") {
-        opts.onModelProgress?.(data.progress);
-        return;
-      }
-      if (data.type === "decode-progress") {
-        opts.onDecodeProgress?.({ phase: data.phase });
-        return;
-      }
-      if (data.type === "frame-progress") {
-        opts.onFrameProgress?.({ current: data.current, total: data.total });
-        return;
-      }
-      // data.type === "result" here. Narrow via ok before reading result/error
-      // so TS doesn't complain about the absent field on the success branch.
-      worker.terminate();
-      if (data.ok) {
-        resolve(data.result);
-      } else {
-        reject(new Error(data.error ?? "Worker failed without an error message"));
-      }
-    };
-    worker.onerror = (e) => {
-      worker.terminate();
-      reject(new Error(e.message || "Worker failed to load"));
-    };
-    // Transfer the source buffer to avoid copying large image bytes.
-    worker.postMessage(input, [input.source]);
-  });
+  const session = createBatchWorkerSession();
+  try {
+    return await session.process(input, opts);
+  } finally {
+    session.dispose();
+  }
 }

@@ -12,17 +12,37 @@ import { browserEncoderWithSource } from "./canvasCodec";
 import { aiUpscaler, createBlendingUpscaler, faithfulUpscaler } from "./upscaler";
 import { loadRealEsrganModel } from "./modelLoader";
 import { resolveAnimatedCodecPair } from "./animatedCodecPair";
-import type { ModelLoaderDeps, PipelineDeps } from "../types";
+import { createSessionMemo } from "./sessionMemo";
+import type { ContentType, ModelLoaderDeps, PipelineDeps } from "../types";
 
 /**
- * Browser model loader: delegates to the lazy R2 + IndexedDB ORT loader. WebGPU
+ * Module-scoped cache of compiled models, keyed by content type (issue #46).
+ *
+ * A Web Worker is one module instance for its whole lifetime. When a batch runs
+ * many images through a single persistent worker (see `createBatchWorkerSession`
+ * in `runInWorker.ts`), memoizing here means the expensive ONNX
+ * `InferenceSession` compile happens once per content type and every subsequent
+ * image reuses the warm session. In the single-image path the worker is disposed
+ * after one image, so the cache lives and dies with that one run — no behaviour
+ * change. Switching content mid-batch (photo\u2194anime) keeps each model warm under
+ * its own key.
+ */
+const modelMemo = createSessionMemo<ContentType, import("../types").AiModel>();
+
+/**
+ * Browser model loader: delegates to the lazy R2 + IndexedDB ORT loader, memoized
+ * so a persistent (batch) worker compiles each model's session only once. WebGPU
  * is preferred (per ADR-0003); the device-capability gate from #5 has already
  * confirmed at least one viable EP before this is reached, so we re-probe
- * navigator.gpu here only to pick the bundle.
+ * navigator.gpu there only to pick the bundle.
+ *
+ * Note: on a memo hit the `onProgress` callback does not fire — the model is
+ * already loaded, so there is no download to report (the first image already
+ * showed the one-time indicator).
  */
 const browserModelLoader: ModelLoaderDeps = {
-  async loadModel(content, onProgress) {
-    return loadRealEsrganModel(content, onProgress, true);
+  loadModel(content, onProgress) {
+    return modelMemo.get(content, () => loadRealEsrganModel(content, onProgress, true));
   },
 };
 
