@@ -80,6 +80,13 @@ function App() {
   // The lossless/lossy toggle only applies to WebP under AI mode (PNG is always
   // lossless; JPEG is always lossy). Ignored when not WebP.
   const [webpLossless, setWebpLossless] = useState(true);
+  // Enhancement strength (ADR-0008, issue #40): a 0–100% slider in AI mode
+  // that controls the alpha blend between the AI and faithful upscaled outputs.
+  // Defaults to 100% (pure AI) so existing behaviour is unchanged. Only shown
+  // for AI mode + still images; hidden for animated inputs (ADR-0008: blending
+  // the AI-enhanced first frame against faithful subsequent frames causes
+  // visible frame-to-frame inconsistency).
+  const [enhancementStrength, setEnhancementStrength] = useState(100);
   const [contentTypeOverride, setContentTypeOverride] = useState<"auto" | ContentType>("auto");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -247,6 +254,13 @@ function App() {
               effectiveMode === "ai" && contentTypeOverride !== "auto"
                 ? contentTypeOverride
                 : undefined,
+            // Enhancement strength (ADR-0008, issue #40): only meaningful in AI
+            // mode for stills — the slider is hidden otherwise, so alpha is 1.0
+            // (pure AI) here whenever the value is irrelevant. Mapped from the
+            // 0–100% UI control to the [0,1] blend ratio the orchestrator uses.
+            alpha: effectiveMode === "ai" && !isAnimatedInput
+              ? enhancementStrength / 100
+              : 1,
           },
         },
         {
@@ -360,6 +374,8 @@ function App() {
           setWebpLossless={setWebpLossless}
           isAnimated={isAnimatedInput}
           animatedOutputIsApng={animatedOutputIsApng}
+          enhancementStrength={enhancementStrength}
+          setEnhancementStrength={setEnhancementStrength}
         />
 
         {source && (
@@ -706,6 +722,13 @@ interface SettingsControlsProps {
    *  Mirrors the worker's codec-pair resolution so the label never disagrees
    *  with the bytes (ADR-0007). */
   animatedOutputIsApng: boolean;
+  /**
+   * Enhancement strength (0–100, v4 issue #40 / ADR-0008). Only meaningful in
+   * AI mode + still image; the control is hidden otherwise. Internally maps to
+   * the alpha blend ratio (strength / 100) between AI and faithful outputs.
+   */
+  enhancementStrength: number;
+  setEnhancementStrength: (v: number) => void;
 }
 
 /**
@@ -742,6 +765,8 @@ function SettingsControls({
   setOutputFormat,
   webpLossless,
   setWebpLossless,
+  enhancementStrength,
+  setEnhancementStrength,
   isAnimated,
   animatedOutputIsApng,
 }: SettingsControlsProps) {
@@ -909,6 +934,21 @@ function SettingsControls({
         </div>
       )}
 
+      {/* Enhancement strength (ADR-0008, issue #40): an AI-only slider that
+          controls the alpha blend between the AI reconstruction and the faithful
+          Lanczos output. At 100% (default) the run is byte-identical to v1–v3;
+          below 100% the blending upscaler (#38) composes the two outputs. The
+          control is shown only for AI mode + still images — animated inputs hide
+          it (blending the AI first frame against faithful subsequent frames
+          causes visible frame-to-frame inconsistency; ADR-0008). The animated-
+          input messaging is #41's slice; here we only hide the control. */}
+      {mode === "ai" && !isAnimated && (
+        <EnhancementStrengthControl
+          enhancementStrength={enhancementStrength}
+          setEnhancementStrength={setEnhancementStrength}
+        />
+      )}
+
       {/* Output format selector (issue #10). PNG / WebP / JPEG. Faithful mode
           enforces the lossless promise: JPEG and lossy WebP are explained as
           lossless-only under faithful (the orchestrator coerces defensively;
@@ -938,6 +978,61 @@ function SettingsControls({
         </span>
       </label>
     </section>
+  );
+}
+
+interface EnhancementStrengthControlProps {
+  /** The user's 0–100% selection. */
+  enhancementStrength: number;
+  setEnhancementStrength: (v: number) => void;
+}
+
+/**
+ * The enhancement-strength slider (v4, ADR-0008, issue #40).
+ *
+ * A continuous 0–100% control in AI mode for still images. It maps linearly to
+ * the alpha-blend ratio the blending upscaler (#38) applies: 0% → pure faithful
+ * (Lanczos), 100% → pure AI reconstruction (the default, byte-identical to
+ * v1–v3). The honest end-labels state exactly that so the user is never in doubt
+ * about what "0%" and "100%" mean.
+ *
+ * Rendered only in AI mode + still image. The caller gates both: faithful mode
+ * has no AI to blend, and animated inputs hide the slider (ADR-0008: blending
+ * the AI first frame against faithful subsequent frames causes visible
+ * frame-to-frame inconsistency). The animated-hide messaging lands in #41; here
+ * the component is simply not rendered for an animated source.
+ */
+function EnhancementStrengthControl({
+  enhancementStrength,
+  setEnhancementStrength,
+}: EnhancementStrengthControlProps) {
+  return (
+    <div className="flex flex-col gap-2" data-testid="enhancement-strength-control">
+      <div className="flex items-baseline justify-between">
+        <p className="text-sm font-medium">Enhancement strength</p>
+        <span className="text-sm tabular-nums text-muted-foreground" data-testid="enhancement-strength-value">
+          {enhancementStrength}%
+        </span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        step={1}
+        value={enhancementStrength}
+        onChange={(e) => setEnhancementStrength(Number(e.target.value))}
+        data-testid="enhancement-strength-slider"
+        className="w-full accent-primary"
+      />
+      <div className="flex justify-between text-xs text-muted-foreground">
+        <span>0% — no AI (equals faithful)</span>
+        <span>100% — full AI</span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Blends the AI-enhanced result with the faithful Lanczos upscale. Lower
+        values keep more of the original's natural texture.
+      </p>
+    </div>
   );
 }
 
