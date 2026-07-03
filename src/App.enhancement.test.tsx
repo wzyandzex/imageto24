@@ -101,9 +101,14 @@ async function upload(
   }
   vi.stubGlobal("Image", FakeImage);
   try {
-    const input = document.querySelector(
+    // After the first upload the dropzone unmounts and only the "Choose a
+    // different image" replace input remains; querySelectorAll returns them in
+    // document order, so the LAST one is always the currently-mounted input
+    // (the dropzone when no source is loaded, the replace input once one is).
+    const inputs = document.querySelectorAll(
       'input[type="file"]:not([multiple])',
-    ) as HTMLInputElement;
+    );
+    const input = inputs[inputs.length - 1] as HTMLInputElement;
     fireEvent.change(input, { target: { files: [file] } });
     await waitFor(() =>
       expect(screen.getByTestId("original-dimensions")).toBeInTheDocument(),
@@ -172,15 +177,53 @@ describe("enhancement-strength slider — visibility (issue #40, ADR-0008)", () 
     expect(screen.queryByTestId("enhancement-strength-control")).toBeNull();
   });
 
-  it("is hidden in AI mode for an animated (multi-frame GIF) input", async () => {
+  it("is hidden in AI mode for an animated (multi-frame GIF) input, with the honest unavailable message", async () => {
     await renderApp();
     fireEvent.click(screen.getByTestId("mode-ai"));
     // Upload a real 3-frame GIF → detectAnimation reports isAnimated.
     await upload(buildGif(3), "clip.gif", "image/gif");
     // ADR-0008: blending the AI first frame against faithful subsequent frames
     // causes visible frame-to-frame inconsistency, so the slider is hidden for
-    // animated inputs. The messaging lands in #41; here we only assert it's gone.
+    // animated inputs (#40). #41 surfaces the reason honestly rather than
+    // silently omitting the control.
     expect(screen.queryByTestId("enhancement-strength-control")).toBeNull();
+    const msg = screen.getByTestId("enhancement-strength-unavailable");
+    expect(msg.textContent).toMatch(/available for still images only/i);
+  });
+});
+
+describe("enhancement-strength slider — animated messaging (issue #41, ADR-0008)", () => {
+  it("shows neither slider nor unavailable message in faithful mode with an animated input", async () => {
+    // The unavailable message is AI-specific: faithful mode has no AI to blend,
+    // so neither the slider nor the explanation should render for an animated GIF.
+    await renderApp();
+    await upload(buildGif(3), "clip.gif", "image/gif");
+    expect(screen.queryByTestId("enhancement-strength-control")).toBeNull();
+    expect(screen.queryByTestId("enhancement-strength-unavailable")).toBeNull();
+  });
+
+  it("shows the slider (not the message) for a still image in AI mode", async () => {
+    // A single-frame GIF is a still (detectAnimation reports isAnimated=false),
+    // so the slider must show and the unavailable message must not — the inverse
+    // of the animated case. This covers the "load still → slider visible" AC
+    // (issue #41) from the still direction, which is deterministic (no race
+    // between a second upload and React's re-render).
+    await renderApp();
+    fireEvent.click(screen.getByTestId("mode-ai"));
+    await upload(buildGif(1), "still.gif", "image/gif");
+    expect(screen.getByTestId("enhancement-strength-control")).toBeInTheDocument();
+    expect(screen.queryByTestId("enhancement-strength-unavailable")).toBeNull();
+  });
+
+  it("the unavailable message explains why (frame-to-frame inconsistency)", async () => {
+    await renderApp();
+    fireEvent.click(screen.getByTestId("mode-ai"));
+    await upload(buildGif(2), "clip.gif", "image/gif");
+    const msg = screen.getByTestId("enhancement-strength-unavailable");
+    // The reason is stated honestly, not just the headline — the user should
+    // understand *why* the control is unavailable (ADR-0008).
+    expect(msg.textContent).toMatch(/first frame/i);
+    expect(msg.textContent).toMatch(/faithful/i);
   });
 });
 
