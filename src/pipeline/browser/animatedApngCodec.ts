@@ -1,26 +1,128 @@
 /**
- * Environment-bound animated-APNG encoder (issue #27) — the browser-side
- * implementation of {@link AnimatedEncoderDeps} for the v3 high-fidelity path.
+ * Environment-bound animated-APNG codec (issues #27 / #37) — the browser-side
+ * implementation of {@link AnimatedDecoderDeps} and {@link AnimatedEncoderDeps}
+ * for the high-fidelity APNG path.
  *
- * This is the symmetric counterpart to {@link browserAnimatedGifEncoder} and the
- * colour-fidelity win of v3: where the GIF encoder must quantize every frame to
- * ≤256 colours (an inherent GIF limit, ADR-0006), APNG carries full true-colour
- * RGBA — nothing the faithful/Lanczos upscale preserved gets posterized on
- * output. Per ADR-0007 this encoder is selected on WebCodecs-capable devices
- * (the same gate that picks the lossless WebP *decode*), tying one clean
- * capability boundary to a fully lossless round-trip.
- *
- * UPNG.js (~30KB) is lazy-`import()`ed inside the function, so a user who never
- * produces an APNG output (stills, or animated output on a non-WebCodecs device)
- * never downloads it — the same lazy-load strategy the GIF line uses for gifenc.
- *
- * This module is **not** unit-tested at the pixel level: it is bound to the
- * UPNG.js codec, just as `animatedGifCodec.ts` is bound to gifenc. Its contract
- * (true-colour, no quantization; transparency; per-frame timing) is asserted via
- * a stubbed UPNG in `animatedApngCodec.test.ts`, and the full round-trip is
- * exercised end-to-end by the Playwright suite (which re-decodes the APNG).
+ * The encoder is the v3 colour-fidelity win: where GIF output quantizes every
+ * frame to ≤256 colours, APNG carries full true-colour RGBA. The decoder is the
+ * v4 APNG-input slice: WebCodecs `ImageDecoder` is the native path; without it a
+ * self-built APNG parser reconstructs per-frame PNGs and decodes them with pngjs.
  */
-import type { AnimatedEncoderDeps, ImageData } from "../types";
+import { decodeApngFrames } from "./apngParser";
+import type {
+  AnimatedDecoderDeps,
+  AnimatedEncoderDeps,
+  DecodedAnimatedFrame,
+  ImageData,
+  ImageFormat,
+} from "../types";
+
+/* -------------------------------------------------------------------------- */
+/* Decoder (WebCodecs → ImageData, fallback parser + pngjs)                    */
+/* -------------------------------------------------------------------------- */
+
+function videoFrameToImageData(frame: VideoFrame): ImageData {
+  const width = frame.codedWidth;
+  const height = frame.codedHeight;
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("APNG decode: 2D context unavailable for readback");
+  ctx.drawImage(frame, 0, 0);
+  const pixels = ctx.getImageData(0, 0, width, height);
+  return {
+    width,
+    height,
+    data: new Uint8ClampedArray(pixels.data),
+  };
+}
+
+async function decodeAnimatedApngWithWebCodecs(
+  buffer: ArrayBuffer,
+): Promise<DecodedAnimatedFrame[]> {
+  if (typeof ImageDecoder === "undefined") {
+    throw new Error("APNG decode: WebCodecs ImageDecoder unavailable");
+  }
+  const decoder = new ImageDecoder({
+    type: "image/png",
+    data: buffer,
+    colorSpaceConversion: "default",
+  });
+  try {
+    await decoder.tracks.ready;
+    const track = decoder.tracks.selectedTrack;
+    if (!track) throw new Error("APNG decode: ImageDecoder selected no track");
+    const frameCount = track.frameCount;
+    if (!frameCount || frameCount < 1) {
+      throw new Error("APNG decode: ImageDecoder reported no frames");
+    }
+
+    const frames: DecodedAnimatedFrame[] = [];
+    for (let i = 0; i < frameCount; i++) {
+      const result = await decoder.decode({ frameIndex: i });
+      const frame = result.image;
+      try {
+        frames.push({
+          imageData: videoFrameToImageData(frame),
+          delay: Math.max(1, Math.round((frame.duration ?? 100_000) / 1000)),
+          // WebCodecs returns composited full-canvas VideoFrames; disposal/blend
+          // have already affected the pixels, so do-not-dispose is sufficient.
+          disposalType: 1,
+        });
+      } finally {
+        frame.close();
+      }
+    }
+    return frames;
+  } catch (err) {
+    if (err instanceof Error && /no (track|frames)/i.test(err.message)) {
+      throw err;
+    }
+    throw new Error(
+      "APNG decode: the animated PNG could not be parsed or decoded",
+      { cause: err },
+    );
+  } finally {
+    decoder.close();
+  }
+}
+
+async function decodeAnimatedApngWithPngjs(
+  buffer: ArrayBuffer,
+): Promise<DecodedAnimatedFrame[]> {
+  try {
+    const [{ Buffer }, mod] = await Promise.all([
+      import("buffer"),
+      import("pngjs/browser") as Promise<typeof import("pngjs/browser")>,
+    ]);
+    return decodeApngFrames(buffer, async (pngBuffer) => {
+      const bytes = new Uint8Array(pngBuffer);
+      const png = mod.PNG.sync.read(Buffer.from(bytes));
+      return {
+        width: png.width,
+        height: png.height,
+        data: new Uint8ClampedArray(png.data),
+      };
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("APNG decode:")) throw err;
+    throw new Error(
+      "APNG decode: the animated PNG could not be parsed or decoded",
+      { cause: err },
+    );
+  }
+}
+
+export const browserAnimatedApngDecoder: AnimatedDecoderDeps = {
+  async decodeAnimated(
+    buffer: ArrayBuffer,
+    _format?: ImageFormat,
+  ): Promise<readonly DecodedAnimatedFrame[]> {
+    if (typeof ImageDecoder !== "undefined") {
+      return decodeAnimatedApngWithWebCodecs(buffer);
+    }
+    return decodeAnimatedApngWithPngjs(buffer);
+  },
+};
 
 /* -------------------------------------------------------------------------- */
 /* Encoder (UPNG.js → APNG)                                                    */

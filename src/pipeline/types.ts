@@ -31,6 +31,9 @@ export interface ImageData {
  */
 export type ImageFormat = "jpeg" | "png" | "webp" | "avif" | "gif" | "heic";
 
+/** Animated decoder dispatch formats, including APNG before upload routing lands. */
+export type AnimatedImageFormat = ImageFormat | "apng";
+
 /**
  * The subset of {@link ImageFormat} a user may select for *output* (issue #10).
  * AVIF, GIF, and HEIC are input-only — Canvas cannot reliably encode AVIF/GIF in
@@ -182,7 +185,7 @@ export interface AnimatedDecoderDeps {
    */
   decodeAnimated(
     buffer: ArrayBuffer,
-    format?: ImageFormat,
+    format?: AnimatedImageFormat,
   ): Promise<readonly DecodedAnimatedFrame[]>;
 }
 
