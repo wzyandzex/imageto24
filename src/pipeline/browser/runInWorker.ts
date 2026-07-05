@@ -16,8 +16,8 @@
  */
 import ProcessWorker from "./processWorker?worker";
 import type {
+  AnimatedImageFormat,
   FrameProgress,
-  ImageFormat,
   ModelLoadProgress,
   ProcessImageOptions,
   ProcessImageResult,
@@ -25,7 +25,7 @@ import type {
 
 export interface RunInWorkerInput {
   source: ArrayBuffer;
-  format: ImageFormat;
+  format: AnimatedImageFormat;
   options: ProcessImageOptions;
   /**
    * Animated-routing flag (issue #16). When true the worker dispatches to

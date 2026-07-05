@@ -17,8 +17,9 @@ describe("formatFromFile - browser-native formats (unchanged by #15)", () => {
     expect(formatFromFile(file("photo", "image/jpeg"))).toBe("jpeg");
   });
 
-  it("maps PNG / WebP / AVIF / GIF by MIME or extension", () => {
+  it("maps PNG / APNG / WebP / AVIF / GIF by MIME or extension", () => {
     expect(formatFromFile(file("a.png", "image/png"))).toBe("png");
+    expect(formatFromFile(file("a.apng", ""))).toBe("png");
     expect(formatFromFile(file("a.webp", "image/webp"))).toBe("webp");
     expect(formatFromFile(file("a.avif", "image/avif"))).toBe("avif");
     expect(formatFromFile(file("a.gif", "image/gif"))).toBe("gif");
@@ -71,6 +72,7 @@ describe("ACCEPTED_INPUT - the file picker accept string (issue #15, AC)", () =>
       "image/gif",
       ".jpg",
       ".png",
+      ".apng",
       ".webp",
       ".avif",
       ".gif",

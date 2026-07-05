@@ -26,9 +26,9 @@ import {
 } from "./animatedApngCodec";
 import { browserAnimatedWebpDecoder } from "./animatedWebpCodec";
 import type {
+  AnimatedImageFormat,
   AnimatedDecoderDeps,
   AnimatedEncoderDeps,
-  ImageFormat,
 } from "../types";
 
 /**
@@ -92,6 +92,12 @@ export interface AnimatedCodec {
  */
 export interface AnimatedCapability {
   readonly webCodecs: boolean;
+  /**
+   * The animated input container when known. APNG inputs are the ADR-0007 v4
+   * exception: they always output APNG because both decode paths preserve
+   * true-colour frames and APNG encode is pure JS.
+   */
+  readonly inputFormat?: AnimatedImageFormat;
 }
 
 /**
@@ -124,10 +130,11 @@ export function resolveAnimatedCodecPair(
   // without WebCodecs keeps the 256-colour GIF encoder (the universal fallback,
   // never a hard error per ADR-0002). ADR-0007: the animated output format is
   // device-determined, not a user choice.
+  const animatedEncoder = capability.inputFormat === "apng" || capability.webCodecs
+    ? browserAnimatedApngEncoder
+    : browserAnimatedGifEncoder;
   return {
     animatedDecoder: formatAwareAnimatedDecoder,
-    animatedEncoder: capability.webCodecs
-      ? browserAnimatedApngEncoder
-      : browserAnimatedGifEncoder,
+    animatedEncoder,
   };
 }

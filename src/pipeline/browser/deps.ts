@@ -13,7 +13,7 @@ import { aiUpscaler, createBlendingUpscaler, faithfulUpscaler } from "./upscaler
 import { loadRealEsrganModel } from "./modelLoader";
 import { resolveAnimatedCodecPair } from "./animatedCodecPair";
 import { createSessionMemo } from "./sessionMemo";
-import type { ContentType, ModelLoaderDeps, PipelineDeps } from "../types";
+import type { AnimatedImageFormat, ContentType, ModelLoaderDeps, PipelineDeps } from "../types";
 
 /**
  * Module-scoped cache of compiled models, keyed by content type (issue #46).
@@ -52,7 +52,10 @@ const browserModelLoader: ModelLoaderDeps = {
  * @param sourceBytes the original encoded file, kept so the encoder can preserve
  *   EXIF. Undefined when there is no source to copy metadata from.
  */
-export function browserPipelineDeps(sourceBytes: ArrayBuffer | undefined): PipelineDeps {
+export function browserPipelineDeps(
+  sourceBytes: ArrayBuffer | undefined,
+  animatedInputFormat?: AnimatedImageFormat,
+): PipelineDeps {
   // Blending upscaler (v4, ADR-0008): composes the AI and faithful upscalers
   // behind one seam. Built once per run from the two singleton adapters above;
   // the orchestrator reaches for it only when enhancement strength < 100%.
@@ -70,7 +73,10 @@ export function browserPipelineDeps(sourceBytes: ArrayBuffer | undefined): Pipel
     // (ImageDecoder) ⇒ the high-colour APNG path (v3-3/v3-4 plug in here); absent
     // ⇒ the GIF fallback. Both resolve to the existing GIF codec until v3-3/v3-4
     // land, so nothing breaks in the meantime.
-    ...resolveAnimatedCodecPair({ webCodecs: hasWebCodecs() }),
+    ...resolveAnimatedCodecPair({
+      webCodecs: hasWebCodecs(),
+      inputFormat: animatedInputFormat,
+    }),
   };
 }
 

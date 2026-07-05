@@ -16,6 +16,7 @@ import {
   computeUpscaleFactor,
   outputExtension,
   outputMime,
+  type AnimatedImageFormat,
   type CapabilityDecision,
   type ContentType,
   type FrameProgress,
@@ -144,7 +145,15 @@ function App() {
   // exact `hasWebCodecs()` gate the worker uses when resolving the codec pair,
   // so the label shown here can never disagree with the bytes the run emits.
   const isAnimatedInput = !!source?.animation.isAnimated;
-  const animatedOutputIsApng = !!capability?.webCodecs;
+  // For an animated APNG the worker needs the APNG decoder format; every other
+  // input (incl. still PNG) uses the source's resolved format. `source` is
+  // guarded by `if (!source) return` in runUpscale, so the fallback is nominal.
+  const workerFormat: AnimatedImageFormat =
+    isAnimatedInput && source?.animation.apng ? "apng" : source?.format ?? "png";
+  // APNG input is the ADR-0007 v4 exception: even on a non-WebCodecs device the
+  // output is APNG (true-colour), never GIF. Only meaningful for animated input;
+  // for stills the effective output is the user's selection.
+  const animatedOutputIsApng = isAnimatedInput && (!!source?.animation.apng || !!capability?.webCodecs);
   const animatedOutputExt = animatedOutputIsApng ? "apng" : "gif";
   const animatedOutputMime = animatedOutputIsApng ? "image/apng" : "image/gif";
   const effectiveExt = isAnimatedInput
@@ -225,7 +234,7 @@ function App() {
       const res = await processImageInWorker(
         {
           source: buffer,
-          format: source.format,
+          format: workerFormat,
           // Routing flag (issue #16): a multi-frame GIF dispatches to
           // `processAnimated` in the worker; everything else stays on the still
           // path. The detection ran on upload; here we just forward the decision.
@@ -292,7 +301,7 @@ function App() {
       setDecodeProgress(null);
       setFrameProgress(null);
     }
-  }, [source, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput, effectiveMime]);
+  }, [source, workerFormat, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput, effectiveMime]);
 
   const downloadName = source
     ? source.file.name.replace(/\.[^.]+$/, "") + `_${label}_upscaled.${effectiveExt}`
@@ -334,7 +343,7 @@ function App() {
             <Upload className="size-8 text-muted-foreground" />
             <span className="text-lg font-medium">Drop an image here</span>
             <span className="text-sm text-muted-foreground">
-              or click to choose a file (JPEG, PNG, WebP, AVIF, GIF, HEIC)
+              or click to choose a file (JPEG, PNG/APNG, WebP, AVIF, GIF, HEIC)
             </span>
             <input
               ref={inputRef}
@@ -424,13 +433,18 @@ function App() {
                         #29): true-colour APNG on a WebCodecs-capable browser,
                         256-colour GIF otherwise — stated so the user's PNG/WebP/
                         JPEG choice isn't silently ignored.
-                      - APNG input → detected but treated as a still (detection-
-                        only notice; not yet processed as animated).
+                      - APNG input → multi-frame APNG now follows the animated
+                        path and always outputs APNG (ADR-0007 v4 exception);
+                        single-frame APNG is processed as a still.
                     A single-frame GIF/WebP or a plain still shows nothing here. */}
                 {source.animation.isAnimated && (
                   <div className="flex flex-col gap-1" data-testid="animated-notice">
                     <p className="text-muted-foreground">
-                      {source.format === "webp" ? "Animated WebP" : "Animated GIF"} —{" "}
+                      {source.animation.apng
+                        ? "Animated PNG (APNG)"
+                        : source.format === "webp"
+                          ? "Animated WebP"
+                          : "Animated GIF"} —{" "}
                       <span data-testid="animated-frame-count">
                         {source.animation.frameCount} frames
                       </span>{" "}
@@ -457,9 +471,8 @@ function App() {
                 )}
                 {!source.animation.isAnimated && source.animation.apng && (
                   <p data-testid="apng-notice" className="text-xs text-muted-foreground">
-                    This is an animated PNG (APNG). v2 treats it as a still
-                    (first frame only); full APNG support is planned for a
-                    future release.
+                    This APNG contains a single frame, so it is processed as a
+                    still image.
                   </p>
                 )}
                 <Button variant="ghost" size="sm" className="w-fit" onClick={() => replaceRef.current?.click()}>

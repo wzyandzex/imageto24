@@ -3,10 +3,9 @@
  *
  * This is the foundation of the animated line: a cheap, synchronous scan of an
  * uploaded file that decides whether it is an {@link AnimatedImage}
- * (multi-frame) or a still, and routes accordingly. Per ADR-0006 and the v2
- * PRD, animated GIF and animated WebP are both routed to
- * {@link processAnimated} (WebP lands in issue #26); APNG is *detected* (so we
- * can tell the user honestly that it's treated as a still) but not yet routed.
+ * (multi-frame) or a still, and routes accordingly. Per ADR-0006 and the v4
+ * PRD, animated GIF, animated WebP, and APNG are routed to
+ * {@link processAnimated}.
  *
  * Domain terms follow `CONTEXT.md` "Animated image" / "Frame".
  *
@@ -16,7 +15,8 @@
  * O(file size)), so it is milliseconds even for a multi-MB GIF and runs on the
  * main thread on upload without blocking. WebP walks the RIFF chunks counting
  * `ANMF` frames; APNG stops at a single `acTL` chunk. The actual per-frame
- * decode happens later, in the worker (#18 GIF, #26 WebP); here we only count.
+ * decode happens later, in the worker (#18 GIF, #26 WebP, #37 APNG); here we
+ * only count.
  */
 import type { ImageFormat } from "./types";
 
@@ -24,26 +24,26 @@ import type { ImageFormat } from "./types";
  * The result of an animation scan.
  *
  * `isAnimated` is true when the file is a multi-frame container the pipeline
- * routes to {@link processAnimated} — animated GIF (v2) and animated WebP (v3,
- * issue #26). A single-frame file or one whose header we could not parse lands
- * as a still (`isAnimated: false`), routing to {@link processImage}.
+ * routes to {@link processAnimated} — animated GIF, animated WebP, or APNG. A
+ * single-frame file or one whose header we could not parse lands as a still
+ * (`isAnimated: false`), routing to {@link processImage}.
  *
- * `apng` is a detection-only flag: when true the file *is* multi-frame, but v3
- * still treats it as a still (APNG encode lands in #27). The UI surfaces this as
- * an honest notice (PRD user story #19/#20) rather than silently degrading.
+ * `apng` is true when a PNG file carries an `acTL` chunk. In v4 (issue #39),
+ * multi-frame APNGs route to {@link processAnimated}; a single-frame APNG
+ * remains a still. The UI surfaces the single-frame case with an honest notice.
  */
 export interface AnimationScan {
   /**
-   * True for a multi-frame container the pipeline animates — GIF (v2) or WebP
-   * (v3, issue #26). APNG stays detection-only until #27.
+   * True for a multi-frame container the pipeline animates — GIF, WebP, or APNG.
    */
   readonly isAnimated: boolean;
   /**
    * The number of frames detected, or 0 when not animated / uncountable. For a
-   * multi-frame GIF this is the count of image descriptors; for an animated
-   * WebP the count of `ANMF` chunks — in both cases the exact number the
-   * per-frame decode loop will process. Surfaced to the UI so the user
-   * understands what "animated" means concretely (PRD story #17).
+   * multi-frame GIF this is the count of image descriptors; for animated WebP
+   * the count of `ANMF` chunks; for APNG the `acTL.num_frames` value — in all
+   * cases the exact number the per-frame decode loop will process. Surfaced to
+   * the UI so the user understands what "animated" means concretely (PRD story
+   * #17).
    */
   readonly frameCount: number;
   /**
@@ -54,8 +54,9 @@ export interface AnimationScan {
    */
   readonly animatedWebp: boolean;
   /**
-   * True when a PNG file's `acTL` chunk indicates it is an APNG. Detection-only
-   * — v3 processes the first frame; APNG encode lands in #27.
+   * True when a PNG file's `acTL` chunk indicates it is an APNG. In v4 (issue
+   * #39), multi-frame APNGs are routed to {@link processAnimated}; a single-frame
+   * APNG remains a still.
    */
   readonly apng: boolean;
 }
@@ -319,9 +320,9 @@ function scanWebp(buffer: ArrayBuffer): AnimationScan {
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 /**
- * Scan a PNG file's chunks for an `acTL` (animation control) chunk, which
- * marks an APNG. Detection-only — v2 still treats it as a still (PRD §Out of
- * scope). As with WebP, only the boolean is needed for the honest notice.
+ * Scan a PNG file's chunks for an `acTL` (animation control) chunk, which marks
+ * an APNG and declares the frame count. A multi-frame APNG routes to
+ * processAnimated in v4; a single-frame APNG remains a still.
  */
 function scanPngApng(buffer: ArrayBuffer): AnimationScan {
   const bytes = new Uint8Array(buffer);
@@ -346,7 +347,22 @@ function scanPngApng(buffer: ArrayBuffer): AnimationScan {
     );
     pos += 8;
     if (type === "acTL") {
-      return { isAnimated: false, frameCount: 0, animatedWebp: false, apng: true };
+      // A truncated acTL still marks the file as an APNG (the flag drives the
+      // honest single-frame notice), but we cannot trust a frame count, so
+      // treat it as a still rather than hand processAnimated garbage.
+      if (len < 4) {
+        return { isAnimated: false, frameCount: 0, animatedWebp: false, apng: true };
+      }
+      const frameCount =
+        ((bytes[pos] << 24) |
+          (bytes[pos + 1] << 16) |
+          (bytes[pos + 2] << 8) |
+          bytes[pos + 3]) >>>
+        0;
+      if (frameCount < 2) {
+        return { isAnimated: false, frameCount: 0, animatedWebp: false, apng: true };
+      }
+      return { isAnimated: true, frameCount, animatedWebp: false, apng: true };
     }
     pos += len + 4; // data + CRC
   }

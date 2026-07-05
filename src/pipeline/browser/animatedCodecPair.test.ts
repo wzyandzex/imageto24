@@ -124,6 +124,16 @@ describe("resolveAnimatedCodecPair (issues #25 / #26 / #27)", () => {
     ).rejects.toThrow(/APNG decode/i);
   });
 
+  it("APNG input always selects the APNG encoder, even without WebCodecs (ADR-0007 v4 exception)", () => {
+    const apngInput = resolveAnimatedCodecPair({
+      webCodecs: false,
+      inputFormat: "apng",
+    });
+
+    expect(apngInput.animatedEncoder).toBe(browserAnimatedApngEncoder);
+    expect(apngInput.animatedEncoder).not.toBe(browserAnimatedGifEncoder);
+  });
+
   it("degrade path (webCodecs:false): WebP still routes to the WebP decoder, output to the GIF encoder (issue #28)", () => {
     // #28 tracer bullet — the honest-degrade contract on a non-WebCodecs device.
     // ADR-0007 + PRD-0003: a device *without* WebCodecs gets the 256-colour GIF

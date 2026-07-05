@@ -173,7 +173,7 @@ function pngChunk(type: string, data: number[]): number[] {
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 /** Build an APNG: PNG sig + IHDR + acTL (animation control). */
-function buildApng(): ArrayBuffer {
+function buildApng(frames = 3): ArrayBuffer {
   // IHDR: 4×4 image, 8-bit RGBA (the shape the e2e PNG helper uses).
   const ihdr = pngChunk("IHDR", [
     0x00, 0x00, 0x00, 0x04, // width
@@ -181,7 +181,7 @@ function buildApng(): ArrayBuffer {
     0x08, 0x06, 0x00, 0x00, 0x00, // bit depth 8, colour type 6 (RGBA)
   ]);
   // acTL: num_frames(4) + num_plays(4). Its presence marks an APNG.
-  const actl = pngChunk("acTL", [0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00]);
+  const actl = pngChunk("acTL", [...be32(frames), 0x00, 0x00, 0x00, 0x00]);
   return new Uint8Array([...PNG_SIG, ...ihdr, ...actl]).buffer;
 }
 
@@ -421,11 +421,17 @@ describe("detectAnimation — animated WebP (issue #26 routes to processAnimated
   });
 });
 
-describe("detectAnimation — APNG (detection-only, v2 still treats as still)", () => {
-  it("detects an APNG via its acTL chunk", () => {
-    const scan = detectAnimation(buildApng(), "png");
-    // Detection-only: apng is true, isAnimated stays false — v2 processes the
-    // first frame (the PRD's "treated as stills" path for non-GIF animations).
+describe("detectAnimation — APNG (issue #39 routes multi-frame APNG)", () => {
+  it("detects a multi-frame APNG via acTL and counts its frames", () => {
+    const scan = detectAnimation(buildApng(3), "png");
+    expect(scan.apng).toBe(true);
+    expect(scan.isAnimated).toBe(true);
+    expect(scan.frameCount).toBe(3);
+    expect(scan.animatedWebp).toBe(false);
+  });
+
+  it("treats a single-frame APNG as a still", () => {
+    const scan = detectAnimation(buildApng(1), "png");
     expect(scan.apng).toBe(true);
     expect(scan.isAnimated).toBe(false);
     expect(scan.frameCount).toBe(0);
