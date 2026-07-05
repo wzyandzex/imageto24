@@ -19,6 +19,7 @@
   "dependencies": {
     "@jsquash/webp": "^1.5.0",
     "@radix-ui/react-slot": "^1.2.3",
+    "buffer": "^6.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "gifenc": "^1.0.3",
@@ -26,6 +27,7 @@
     "heic2any": "^0.0.4",
     "lucide-react": "^0.515.0",
     "onnxruntime-web": "^1.21.1",
+    "pngjs": "^7.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwind-merge": "^3.3.1",

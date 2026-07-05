@@ -7,7 +7,7 @@
 // logic, not the codec implementations themselves (the WebCodecs/wasm surfaces
 // are exercised in `animatedWebpCodec.test.ts`; the APNG encode contract in
 // `animatedApngCodec.test.ts`).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { resolveAnimatedCodecPair } from "./animatedCodecPair";
 import {
   browserAnimatedApngEncoder,
@@ -68,12 +68,13 @@ describe("resolveAnimatedCodecPair (issues #25 / #26 / #27)", () => {
     expect(c.animatedEncoder).toBe(d.animatedEncoder);
   });
 
-  it("the format-aware decoder routes WebP vs GIF to the right adapter (issue #26)", async () => {
-    // Stub both adapters so the dispatch is observable without a real decode.
-    // The GIF adapter must be called for a gif buffer, the WebP adapter for a
-    // webp buffer — the dispatcher never branches on capability here.
+  it("the format-aware decoder routes WebP, APNG, and GIF to the right adapter (issues #26 / #37)", async () => {
+    // Stub every adapter so the dispatch is observable without a real decode. The
+    // GIF adapter must be called for GIF/default, WebP for WebP, and APNG for APNG
+    // — the dispatcher never branches on capability here.
     let gifCalls = 0;
     let webpCalls = 0;
+    let apngCalls = 0;
     const gif = {
       async decodeAnimated(_buffer: ArrayBuffer, _format?: string) {
         gifCalls++;
@@ -86,14 +87,41 @@ describe("resolveAnimatedCodecPair (issues #25 / #26 / #27)", () => {
         return [];
       },
     };
+    const apng = {
+      async decodeAnimated(_buffer: ArrayBuffer, _format?: string) {
+        apngCalls++;
+        return [];
+      },
+    };
     // Re-implement the same dispatch the production singleton uses, against the
     // stubs, to assert routing without exporting internals.
-    const dispatch = (format: "gif" | "webp") =>
-      (format === "webp" ? webp : gif).decodeAnimated(new ArrayBuffer(0), format);
+    const dispatch = (format: "gif" | "webp" | "apng") =>
+      (format === "webp" ? webp : format === "apng" ? apng : gif)
+        .decodeAnimated(new ArrayBuffer(0), format);
     await dispatch("gif");
     await dispatch("webp");
+    await dispatch("apng");
     expect(gifCalls).toBe(1);
     expect(webpCalls).toBe(1);
+    expect(apngCalls).toBe(1);
+  });
+
+  it("production dispatcher routes APNG to the APNG decoder, not the GIF default (issue #37)", async () => {
+    vi.doMock("pngjs/browser", () => ({
+      PNG: {
+        sync: {
+          read: () => {
+            throw new Error("stub pngjs failure");
+          },
+        },
+      },
+    }));
+    delete (globalThis as unknown as { ImageDecoder?: unknown }).ImageDecoder;
+
+    const pair = resolveAnimatedCodecPair({ webCodecs: false });
+    await expect(
+      pair.animatedDecoder.decodeAnimated(new Uint8Array([0, 1, 2]).buffer, "apng"),
+    ).rejects.toThrow(/APNG decode/i);
   });
 
   it("degrade path (webCodecs:false): WebP still routes to the WebP decoder, output to the GIF encoder (issue #28)", () => {
