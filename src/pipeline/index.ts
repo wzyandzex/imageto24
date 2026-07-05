@@ -7,6 +7,7 @@
  * individual modules, unless you need an internal helper.
  */
 export type {
+  AnimatedImageFormat,
   AiModel,
   AiInferenceSession,
   ContentType,

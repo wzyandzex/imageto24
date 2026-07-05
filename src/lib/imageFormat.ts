@@ -30,6 +30,7 @@ export function formatFromFile(file: File): ImageFormat | undefined {
     jpg: "jpeg",
     jpeg: "jpeg",
     png: "png",
+    apng: "png",
     webp: "webp",
     avif: "avif",
     gif: "gif",
@@ -48,4 +49,4 @@ export function formatFromFile(file: File): ImageFormat | undefined {
  */
 export const ACCEPTED_INPUT =
   "image/jpeg,image/png,image/webp,image/avif,image/gif,image/heic,image/heif," +
-  ".jpg,.jpeg,.png,.webp,.avif,.gif,.heic,.heif";
+  ".jpg,.jpeg,.png,.apng,.webp,.avif,.gif,.heic,.heif";

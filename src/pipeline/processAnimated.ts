@@ -31,12 +31,12 @@ import { computeUpscaleFactor, tierToLongEdge } from "./computeUpscaleFactor";
 import { dimsForLongEdge } from "./lanczos";
 import { estimateAiMemoryCost, resolveAiCapability } from "./capability";
 import type {
+  AnimatedImageFormat,
   AiModel,
   ContentType,
   ExactTargetSize,
   FrameProgressCb,
   ImageData,
-  ImageFormat,
   ModelLoadProgressCb,
   PipelineDeps,
   ProcessImageOptions,
@@ -60,7 +60,7 @@ import { classifyContent } from "./contentClassifier";
  */
 export async function processAnimated(
   deps: PipelineDeps,
-  file: { buffer: ArrayBuffer; format: ImageFormat },
+  file: { buffer: ArrayBuffer; format: AnimatedImageFormat },
   options: ProcessImageOptions,
   onModelProgress?: ModelLoadProgressCb,
   onFrameProgress?: FrameProgressCb,

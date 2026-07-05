@@ -164,12 +164,12 @@ function pngChunk(type: string, data: number[]): number[] {
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
-/** Build an APNG (PNG sig + IHDR + acTL). Detection-only in v2. */
-function buildApng(): Uint8Array {
+/** Build an APNG (PNG sig + IHDR + acTL). */
+function buildApng(frames = 3): Uint8Array {
   const ihdr = pngChunk("IHDR", [
     0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x06, 0x00, 0x00, 0x00,
   ]);
-  const actl = pngChunk("acTL", [0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00]);
+  const actl = pngChunk("acTL", [...be32(frames), 0x00, 0x00, 0x00, 0x00]);
   return new Uint8Array([...PNG_SIG, ...ihdr, ...actl]);
 }
 
@@ -382,17 +382,23 @@ describe("animated WebP / APNG notices (issue #16/#26, PRD stories #19/#20)", ()
     expect(screen.queryByTestId("apng-notice")).toBeNull();
   });
 
-  it("shows the APNG 'treated as a still in v2' notice on upload", async () => {
+  it("routes an animated APNG to the animated path and shows the frame-count notice (issue #39)", async () => {
     await renderApp();
-    // A real APNG (PNG sig + IHDR + acTL). detectAnimation flags it apng; the
-    // honest notice surfaces. Same treatment as animated WebP — detection-only.
-    await upload(buildApng(), "anim.png", "image/png");
+    await upload(buildApng(3), "anim.png", "image/png");
+
+    expect(screen.getByTestId("animated-notice")).toBeInTheDocument();
+    expect(screen.getByTestId("animated-notice").textContent).toMatch(/Animated PNG \(APNG\)/i);
+    expect(screen.getByTestId("animated-frame-count").textContent).toMatch(/3 frames/);
+    expect(screen.queryByTestId("apng-notice")).toBeNull();
+  });
+
+  it("shows the single-frame APNG still notice on upload", async () => {
+    await renderApp();
+    await upload(buildApng(1), "still.png", "image/png");
 
     expect(screen.getByTestId("apng-notice")).toBeInTheDocument();
-    expect(screen.getByTestId("apng-notice").textContent).toMatch(
-      /treated as a still|first frame/i,
-    );
-    expect(screen.queryByTestId("animated-gif-notice")).toBeNull();
+    expect(screen.getByTestId("apng-notice").textContent).toMatch(/single frame|still image/i);
+    expect(screen.queryByTestId("animated-notice")).toBeNull();
     expect(screen.queryByTestId("animated-webp-notice")).toBeNull();
   });
 
@@ -426,10 +432,38 @@ describe("animated WebP / APNG notices (issue #16/#26, PRD stories #19/#20)", ()
     expect(captured!.animated).toBe(true);
     expect(captured!.format).toBe("webp");
   });
+
+  it("sets the animated routing flag and APNG decoder format for an animated APNG", async () => {
+    let captured: { animated?: boolean; format?: string } | undefined;
+    processImageInWorkerImpl = (input) => {
+      captured = input as { animated?: boolean; format?: string };
+      return Promise.resolve({
+        buffer: new ArrayBuffer(8),
+        meta: {
+          mode: "faithful",
+          factor: 4,
+          width: 3840,
+          height: 2160,
+          noUpscale: false,
+          frameCount: 3,
+        },
+      });
+    };
+
+    await renderApp();
+    await upload(buildApng(3), "anim.png", "image/png");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("upscale-button"));
+    });
+    await waitFor(() => expect(captured).toBeDefined());
+    expect(captured!.animated).toBe(true);
+    expect(captured!.format).toBe("apng");
+  });
 });
 
 /* -------------------------------------------------------------------------- */
-/* Animated output format — device-determined, read-only (issue #29)          */
+/* Animated output format — read-only, device-determined (issue #29)          */
 /* -------------------------------------------------------------------------- */
 
 describe("animated output format — read-only, device-determined (issue #29)", () => {
@@ -461,6 +495,18 @@ describe("animated output format — read-only, device-determined (issue #29)", 
     expect(label.textContent).toMatch(/GIF/i);
     expect(label.textContent).toMatch(/256/i);
     expect(label.textContent).toMatch(/WebCodecs/i);
+  });
+
+  it("states APNG output for animated APNG even on a non-WebCodecs device", async () => {
+    mockCapability.webCodecs = false;
+
+    await renderApp();
+    await upload(buildApng(3), "anim.png", "image/png");
+
+    const label = screen.getByTestId("animated-output-label");
+    expect(label.textContent).toMatch(/APNG/i);
+    expect(label.textContent).toMatch(/true colour/i);
+    expect(label.textContent).not.toMatch(/GIF/i);
   });
 
   it("the animation-preserved notice names the device-determined output (APNG vs GIF)", async () => {

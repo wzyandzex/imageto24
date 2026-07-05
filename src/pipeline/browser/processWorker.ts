@@ -27,6 +27,7 @@
 import { browserPipelineDeps } from "@/pipeline/browser/deps";
 import { processAnimated, processImage } from "@/pipeline";
 import type {
+  AnimatedImageFormat,
   ImageFormat,
   ModelLoadProgress,
   ProcessImageOptions,
@@ -124,7 +125,7 @@ installHeic2anyWorkerShim();
 
 self.onmessage = async (event: MessageEvent<{
   source: ArrayBuffer;
-  format: ImageFormat;
+  format: AnimatedImageFormat;
   options: ProcessImageOptions;
   animated?: boolean;
 }>) => {
@@ -143,16 +144,16 @@ self.onmessage = async (event: MessageEvent<{
     if (format === "heic") {
       post({ type: "decode-progress", phase: "heic-converting" });
     }
-    const deps = browserPipelineDeps(source);
-    // Animated routing (issues #16/#26): the UI ran `detectAnimation` on upload
-    // and set `animated` when the file is a multi-frame GIF or animated WebP.
-    // Dispatch to the sibling `processAnimated` orchestrator; everything else
-    // (stills, single-frame GIF/WebP, APNG treated as stills) stays on
-    // `processImage`. The two orchestrators share the PipelineDeps seam, so the
-    // worker boundary is the only place this branch exists. processAnimated
-    // decodes every frame (gifuct-js for GIF, WebCodecs ImageDecoder / wasm for
-    // WebP via the format-aware dispatcher) → upscales → re-encodes; the
-    // per-frame progress it emits is forwarded as `frame-progress`.
+    const deps = browserPipelineDeps(source, animated ? format : undefined);
+    // Animated routing (issues #16/#26/#39): the UI ran `detectAnimation` on
+    // upload and set `animated` when the file is a multi-frame GIF, WebP, or
+    // APNG. Dispatch to the sibling `processAnimated` orchestrator; everything
+    // else (stills, single-frame GIF/WebP/APNG) stays on `processImage`. The two
+    // orchestrators share the PipelineDeps seam, so the worker boundary is the
+    // only place this branch exists. processAnimated decodes every frame through
+    // the format-aware dispatcher → upscales → re-encodes; the per-frame progress
+    // it emits is forwarded as `frame-progress`.
+    const stillFormat: ImageFormat = format === "apng" ? "png" : format;
     const run = animated
       ? processAnimated(
           deps,
@@ -164,7 +165,7 @@ self.onmessage = async (event: MessageEvent<{
         )
       : processImage(
           deps,
-          { buffer: source, format },
+          { buffer: source, format: stillFormat },
           options,
           (p: ModelLoadProgress) => post({ type: "progress", progress: p }),
         );

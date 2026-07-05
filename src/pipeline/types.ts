@@ -31,7 +31,7 @@ export interface ImageData {
  */
 export type ImageFormat = "jpeg" | "png" | "webp" | "avif" | "gif" | "heic";
 
-/** Animated decoder dispatch formats, including APNG before upload routing lands. */
+/** Animated decoder dispatch formats, including APNG's animated-container path. */
 export type AnimatedImageFormat = ImageFormat | "apng";
 
 /**
