@@ -2,10 +2,10 @@
 //
 // Component tests for the privacy trust layer (issue #11). These assert the
 // acceptance criteria the pure-function seam can't reach: the privacy surface
-// is reachable from the app, states that processing is local and verifiable via
-// DevTools, references the open source as the second proof layer, exposes a
-// functional donation link, and reiterates the honest scope notes (AI is
-// non-lossless, HEIC is a v2 target).
+// is reachable from the app, states the local-first/upload-consent boundary and
+// how local runs are verifiable via DevTools, references the open source as the
+// second proof layer, exposes a functional donation link, and reiterates the
+// honest scope notes (AI is non-lossless, HEIC is a v2 target).
 //
 // Mirrors the mocking pattern in App.outputformat.test.tsx.
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -70,17 +70,19 @@ describe("privacy trust layer — content (issue #11 AC)", () => {
     return screen.getByTestId("privacy-dialog");
   }
 
-  it("states that processing is local (layer 1)", async () => {
+  it("states the local-first upload-consent boundary (layer 1)", async () => {
     const dialog = await openDialog();
-    expect(dialog.textContent).toMatch(/never leave your device/i);
-    expect(dialog.textContent).toMatch(/no server/i);
+    expect(dialog.textContent).toMatch(/local by default/i);
+    expect(dialog.textContent).toMatch(/upload by consent/i);
+    expect(dialog.textContent).toMatch(/cloud temporal enhancement/i);
+    expect(dialog.textContent).toMatch(/explicitly choose cloud temporal enhancement/i);
   });
 
   it("explains how to verify via the DevTools Network panel", async () => {
     const dialog = await openDialog();
     expect(dialog.textContent).toMatch(/DevTools/i);
     expect(dialog.textContent).toMatch(/Network/i);
-    expect(dialog.textContent).toMatch(/no image bytes/i);
+    expect(dialog.textContent).toMatch(/no request carrying your image/i);
   });
 
   it("references open source as the second proof layer", async () => {

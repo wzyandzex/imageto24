@@ -157,7 +157,7 @@ export async function processAnimated(
   if (mode === "ai" && !factorResult.noUpscale && factorResult.factor !== undefined) {
     const contentType: ContentType =
       options.contentType ?? classifyContent(frames[0].imageData);
-    model = await deps.modelLoader.loadModel(contentType, onModelProgress);
+    model = await deps.modelLoader.loadModel(contentType, onModelProgress, options.modelId);
   }
 
   const enhanced: { imageData: ImageData; delay: number; disposalType: number }[] = [];

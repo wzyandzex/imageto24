@@ -11,23 +11,23 @@ import { browserDecoder } from "./canvasCodec";
 import { browserEncoderWithSource } from "./canvasCodec";
 import { aiUpscaler, createBlendingUpscaler, faithfulUpscaler } from "./upscaler";
 import { loadRealEsrganModel } from "./modelLoader";
+import { getModelAsset, getModelAssetById } from "./modelConfig";
 import { resolveAnimatedCodecPair } from "./animatedCodecPair";
 import { createSessionMemo } from "./sessionMemo";
-import type { AnimatedImageFormat, ContentType, ModelLoaderDeps, PipelineDeps } from "../types";
+import type { AnimatedImageFormat, ModelLoaderDeps, PipelineDeps } from "../types";
 
 /**
- * Module-scoped cache of compiled models, keyed by content type (issue #46).
+ * Module-scoped cache of compiled models, keyed by model id (issue #46/#63).
  *
  * A Web Worker is one module instance for its whole lifetime. When a batch runs
  * many images through a single persistent worker (see `createBatchWorkerSession`
  * in `runInWorker.ts`), memoizing here means the expensive ONNX
- * `InferenceSession` compile happens once per content type and every subsequent
- * image reuses the warm session. In the single-image path the worker is disposed
- * after one image, so the cache lives and dies with that one run — no behaviour
- * change. Switching content mid-batch (photo\u2194anime) keeps each model warm under
- * its own key.
+ * `InferenceSession` compile happens once per model and every subsequent image
+ * reuses the warm session. In the single-image path the worker is disposed after
+ * one image, so the cache lives and dies with that one run — no behaviour change.
+ * Switching content/model mid-batch keeps each model warm under its own key.
  */
-const modelMemo = createSessionMemo<ContentType, import("../types").AiModel>();
+const modelMemo = createSessionMemo<string, import("../types").AiModel>();
 
 /**
  * Browser model loader: delegates to the lazy R2 + IndexedDB ORT loader, memoized
@@ -41,8 +41,9 @@ const modelMemo = createSessionMemo<ContentType, import("../types").AiModel>();
  * showed the one-time indicator).
  */
 const browserModelLoader: ModelLoaderDeps = {
-  loadModel(content, onProgress) {
-    return modelMemo.get(content, () => loadRealEsrganModel(content, onProgress, true));
+  loadModel(content, onProgress, modelId) {
+    const asset = modelId ? getModelAssetById(modelId) : getModelAsset(content);
+    return modelMemo.get(asset.id, () => loadRealEsrganModel(content, onProgress, modelId, true));
   },
 };
 

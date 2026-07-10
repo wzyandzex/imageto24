@@ -1,14 +1,15 @@
-import { useCallback, useRef, useState } from "react";
-import { Download, Heart, ImageIcon, Loader2, Lock, ShieldCheck, Sparkles, Upload } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Download, Heart, ImageIcon, Loader2, Lock, RefreshCw, ShieldCheck, Sparkles, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BatchPanel } from "@/components/BatchPanel";
 import { PrivacyDialog } from "@/components/PrivacyDialog";
 import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
 import { SITE_LINKS } from "@/lib/siteLinks";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
+import { browserCloudTemporalJobClient } from "@/pipeline/browser/cloudTemporalClient";
 import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import { useRunReadiness } from "@/pipeline/useRunReadiness";
-import { detectAnimation, type AnimationScan } from "@/pipeline";
+import { detectAnimation, isTerminalCloudTemporalStatus, modelLimitationSummary, MODEL_CATALOG, resolveModelRouting, type AnimationScan } from "@/pipeline";
 import { targetLabel } from "@/pipeline/runReadiness";
 import {
   OUTPUT_FORMATS,
@@ -18,10 +19,16 @@ import {
   outputMime,
   type AnimatedImageFormat,
   type CapabilityDecision,
+  type CloudTemporalJob,
+  type CloudTemporalJobResult,
+  type CloudTemporalOutputFormat,
+  type CloudTemporalRecoveryIdentity,
+  type CloudTemporalSourceFormat,
   type ContentType,
   type FrameProgress,
   type ImageFormat,
   type ModelLoadProgress,
+  type AiModelMetadata,
   type OutputFormat,
   type ProcessImageResult,
   type ProcessingMode,
@@ -60,6 +67,12 @@ interface SourceImage {
 
 const TIERS: ResolutionTier[] = ["1080p", "2K", "4K"];
 const FACTORS: UpscaleFactor[] = [2, 3, 4];
+const ENHANCEMENT_PRESETS = [
+  { label: "Natural", value: 35 },
+  { label: "Balanced", value: 60 },
+  { label: "Crisp", value: 80 },
+  { label: "Full AI", value: 100 },
+] as const;
 
 function App() {
   const [source, setSource] = useState<SourceImage | null>(null);
@@ -81,17 +94,22 @@ function App() {
   // The lossless/lossy toggle only applies to WebP under AI mode (PNG is always
   // lossless; JPEG is always lossy). Ignored when not WebP.
   const [webpLossless, setWebpLossless] = useState(true);
-  // Enhancement strength (ADR-0008, issue #40): a 0–100% slider in AI mode
-  // that controls the alpha blend between the AI and faithful upscaled outputs.
-  // Defaults to 100% (pure AI) so existing behaviour is unchanged. Only shown
-  // for AI mode + still images; hidden for animated inputs (ADR-0008: blending
-  // the AI-enhanced first frame against faithful subsequent frames causes
-  // visible frame-to-frame inconsistency).
+  // Enhancement strength (ADR-0008, issue #40/#62): a 0–100% slider in AI mode
+  // that controls the alpha blend between the AI and faithful upscaled outputs for
+  // still images, and the uniform cloud temporal strength for opted-in animated
+  // jobs. Defaults to 100% (pure AI) so existing behaviour is unchanged. Local
+  // animated AI keeps it hidden because blending the AI-enhanced first frame
+  // against faithful subsequent frames causes visible frame-to-frame inconsistency.
   const [enhancementStrength, setEnhancementStrength] = useState(100);
   const [contentTypeOverride, setContentTypeOverride] = useState<"auto" | ContentType>("auto");
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProcessImageResult | null>(null);
+  const [cloudJob, setCloudJob] = useState<CloudTemporalJob | null>(null);
+  const [cloudResult, setCloudResult] = useState<CloudTemporalJobResult | null>(null);
+  const [cloudResultUrl, setCloudResultUrl] = useState<string | null>(null);
+  const [cloudRecoveryError, setCloudRecoveryError] = useState<string | null>(null);
+  const [cloudDeletePending, setCloudDeletePending] = useState(false);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelLoadProgress | null>(null);
   // HEIC first-use indicator (PRD user story #5): the worker fires a one-shot
@@ -106,6 +124,10 @@ function App() {
   // Privacy & about dialog (issue #11). Opened from the header chip and the
   // footer; the dialog is the verifiable-privacy surface.
   const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [cloudTemporalOptIn, setCloudTemporalOptIn] = useState(false);
+  const [cloudUploadConsent, setCloudUploadConsent] = useState(false);
+  const [cloudTemporalOutputFormat, setCloudTemporalOutputFormat] = useState<CloudTemporalOutputFormat>("apng");
+  const [modelOverrideId, setModelOverrideId] = useState<string>("auto");
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
 
@@ -145,6 +167,27 @@ function App() {
   // exact `hasWebCodecs()` gate the worker uses when resolving the codec pair,
   // so the label shown here can never disagree with the bytes the run emits.
   const isAnimatedInput = !!source?.animation.isAnimated;
+  const canUseCloudTemporal = isAnimatedInput && effectiveMode === "ai";
+  const useCloudTemporal = canUseCloudTemporal && cloudTemporalOptIn;
+  const modelRoutingContentType = contentTypeOverride === "auto" ? undefined : contentTypeOverride;
+  const modelRoutingContext = {
+    runtimeTarget: useCloudTemporal ? "cloud" as const : "local" as const,
+    sourceType: isAnimatedInput && useCloudTemporal ? "animated" as const : "still" as const,
+    contentType: modelRoutingContentType,
+  };
+  const modelRoutingDecision = resolveModelRouting({
+    ...modelRoutingContext,
+    overrideModelId: modelOverrideId === "auto" ? undefined : modelOverrideId,
+  });
+  const cloudConsentMissing = useCloudTemporal && !cloudUploadConsent;
+  const setCloudResultDownload = useCallback((cloudResult: CloudTemporalJobResult | null) => {
+    setCloudResult(cloudResult);
+    setCloudResultUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      if (!cloudResult) return null;
+      return URL.createObjectURL(new Blob([cloudResult.buffer], { type: cloudResult.mimeType }));
+    });
+  }, []);
   // For an animated APNG the worker needs the APNG decoder format; every other
   // input (incl. still PNG) uses the source's resolved format. `source` is
   // guarded by `if (!source) return` in runUpscale, so the fallback is nominal.
@@ -164,8 +207,96 @@ function App() {
     : outputMime(effectiveOutput.format);
   const label = targetLabel(target);
   // triggerDisabled from readiness + the separate "no source" guard the UI
-  // still owns (no run makes sense before an image is loaded).
-  const triggerDisabled = !source || readiness.triggerDisabled;
+  // still owns (no run makes sense before an image is loaded). Cloud temporal
+  // enhancement adds one extra gate: upload consent is required before source
+  // bytes leave the device (ADR-0009).
+  const triggerDisabled = !source || readiness.triggerDisabled || cloudConsentMissing;
+
+  useEffect(() => {
+    if (canUseCloudTemporal) return;
+    setCloudTemporalOptIn(false);
+    setCloudUploadConsent(false);
+    setCloudTemporalOutputFormat("apng");
+    setModelOverrideId("auto");
+  }, [canUseCloudTemporal]);
+
+  useEffect(() => {
+    if (modelOverrideId === "auto") return;
+    if (modelRoutingDecision.kind === "override") return;
+    setModelOverrideId("auto");
+  }, [modelOverrideId, modelRoutingDecision.kind, modelRoutingDecision.model.id]);
+
+  const refreshCloudJob = useCallback(async (recovery: CloudTemporalRecoveryIdentity) => {
+    setCloudRecoveryError(null);
+    const nextJob = await browserCloudTemporalJobClient.getJob(recovery);
+    setCloudJob(nextJob);
+    if (nextJob.status === "ready") {
+      setCloudResultDownload(null);
+      const nextResult = await browserCloudTemporalJobClient.getResult(nextJob.recovery);
+      setCloudResultDownload(nextResult);
+    } else {
+      setCloudResultDownload(null);
+    }
+    if (nextJob.status === "failed") {
+      setError(nextJob.failure?.message ?? "Cloud temporal enhancement failed.");
+      setStatus("error");
+    } else if (nextJob.status === "ready" || nextJob.status === "expired" || nextJob.status === "deleted") {
+      setError(null);
+      setStatus("done");
+    } else {
+      setError(null);
+      setStatus("processing");
+    }
+    return nextJob;
+  }, [setCloudResultDownload]);
+
+  const deleteCloudJob = useCallback(async () => {
+    if (!cloudJob || cloudDeletePending || cloudJob.status === "deleted" || cloudJob.status === "expired") return;
+    setCloudDeletePending(true);
+    setCloudRecoveryError(null);
+    try {
+      const deleted = await browserCloudTemporalJobClient.deleteJob(cloudJob.recovery);
+      setCloudJob(deleted);
+      setCloudResultDownload(null);
+      setStatus("done");
+      setError(null);
+      if (window.location.hash.includes("cloud-job=")) {
+        window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      }
+    } catch (err) {
+      setCloudRecoveryError(err instanceof Error ? err.message : String(err));
+      setStatus("error");
+    } finally {
+      setCloudDeletePending(false);
+    }
+  }, [cloudJob, cloudDeletePending, setCloudResultDownload]);
+
+  useEffect(() => {
+    const recovery = recoveryFromHash(window.location.hash);
+    if (!recovery) return;
+    void refreshCloudJob(recovery).catch((err) => {
+      setCloudRecoveryError(err instanceof Error ? err.message : String(err));
+      setStatus("error");
+    });
+  }, [refreshCloudJob]);
+
+  useEffect(() => {
+    if (!cloudJob || isTerminalCloudTemporalStatus(cloudJob.status)) return;
+    const id = window.setInterval(() => {
+      void refreshCloudJob(cloudJob.recovery).catch((err) => {
+        setCloudRecoveryError(err instanceof Error ? err.message : String(err));
+        setStatus("error");
+      });
+    }, 2_000);
+    return () => window.clearInterval(id);
+  }, [cloudJob, refreshCloudJob]);
+
+  useEffect(() => {
+    return () => {
+      if (resultUrl) URL.revokeObjectURL(resultUrl);
+      if (cloudResultUrl) URL.revokeObjectURL(cloudResultUrl);
+    };
+  }, [resultUrl, cloudResultUrl]);
 
   // Load a chosen file: read bytes, probe dimensions via an Image, stash state.
   //
@@ -180,6 +311,17 @@ function App() {
   const loadFile = useCallback(async (file: File) => {
     setError(null);
     setResult(null);
+    setCloudJob(null);
+    setCloudDeletePending(false);
+    setCloudResultDownload(null);
+    setCloudRecoveryError(null);
+    setCloudTemporalOptIn(false);
+    setCloudUploadConsent(false);
+    setCloudTemporalOutputFormat("apng");
+    setModelOverrideId("auto");
+    if (window.location.hash.includes("cloud-job=")) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     setResultUrl(null);
     const format = formatFromFile(file);
@@ -225,12 +367,59 @@ function App() {
     setStatus("processing");
     setError(null);
     setResult(null);
+    setCloudJob(null);
+    setCloudDeletePending(false);
+    setCloudResultDownload(null);
     setModelProgress(null);
     setDecodeProgress(null);
     setFrameProgress(null);
     try {
       // Read fresh bytes each run; the worker transfers (detaches) the buffer.
       const buffer = await source.file.arrayBuffer();
+      if (useCloudTemporal) {
+        if (!cloudUploadConsent) {
+          throw new Error("Confirm upload consent before starting cloud temporal enhancement.");
+        }
+        const job = await browserCloudTemporalJobClient.createJob({
+          source: {
+            buffer,
+            metadata: {
+              fileName: source.file.name,
+              mimeType: source.file.type || effectiveMime,
+              format: workerFormat as CloudTemporalSourceFormat,
+              byteSize: source.file.size || buffer.byteLength,
+              width: source.width,
+              height: source.height,
+              frameCount: source.animation.frameCount,
+              hasAlpha: source.format === "png" || source.format === "webp" || source.format === "gif",
+            },
+          },
+          target,
+          enhancementStrength,
+          outputFormat: cloudTemporalOutputFormat,
+          modelRouting: modelRoutingDecision.kind === "override"
+            ? {
+                kind: "override",
+                modelId: modelRoutingDecision.model.id,
+                contentType: modelRoutingContentType,
+              }
+            : {
+                kind: "auto",
+                modelId: modelRoutingDecision.model.id,
+                contentType: modelRoutingContentType,
+              },
+        });
+        setCloudJob(job);
+        setCloudResultDownload(null);
+        window.history.replaceState(null, "", job.recovery.url);
+        if (job.status === "failed") {
+          setStatus("error");
+          setError(job.failure?.message ?? "Cloud temporal enhancement could not start.");
+        } else {
+          setStatus(isTerminalCloudTemporalStatus(job.status) ? "done" : "processing");
+        }
+        return;
+      }
       const res = await processImageInWorker(
         {
           source: buffer,
@@ -262,6 +451,10 @@ function App() {
             contentType:
               effectiveMode === "ai" && contentTypeOverride !== "auto"
                 ? contentTypeOverride
+                : undefined,
+            modelId:
+              effectiveMode === "ai" && modelRoutingDecision.kind === "override"
+                ? modelRoutingDecision.model.id
                 : undefined,
             // Enhancement strength (ADR-0008, issue #40): only meaningful in AI
             // mode for stills — the slider is hidden otherwise, so alpha is 1.0
@@ -301,7 +494,7 @@ function App() {
       setDecodeProgress(null);
       setFrameProgress(null);
     }
-  }, [source, workerFormat, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput, effectiveMime]);
+  }, [source, useCloudTemporal, cloudUploadConsent, workerFormat, effectiveMime, target, enhancementStrength, cloudTemporalOutputFormat, modelRoutingDecision.kind, modelRoutingDecision.model.id, modelRoutingContentType, contentTypeOverride, effectiveMode, effectiveOutput, preserveExif, isAnimatedInput, resultUrl, setCloudResultDownload]);
 
   const downloadName = source
     ? source.file.name.replace(/\.[^.]+$/, "") + `_${label}_upscaled.${effectiveExt}`
@@ -314,11 +507,11 @@ function App() {
           <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">imageto24</h1>
           <p className="mx-auto max-w-prose text-balance text-muted-foreground">
             Upscale images to 1080p, 2K, or 4K — faithfully, with mathematically
-            lossless Lanczos interpolation. Everything runs in your browser;
-            no image bytes ever leave your device.
+            lossless Lanczos interpolation. Local processing runs in your browser;
+            cloud temporal enhancement is optional and upload-gated.
           </p>
           <p className="mx-auto inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Lock className="size-3" /> Privacy by architecture — there is no server.{" "}
+            <Lock className="size-3" /> Local-first privacy — uploads require explicit consent.{" "}
             <button
               data-testid="privacy-link-header"
               onClick={() => setPrivacyOpen(true)}
@@ -374,6 +567,10 @@ function App() {
           source={source}
           contentTypeOverride={contentTypeOverride}
           setContentTypeOverride={setContentTypeOverride}
+          modelRoutingDecision={modelRoutingDecision}
+          modelRoutingContext={modelRoutingContext}
+          modelOverrideId={modelOverrideId}
+          setModelOverrideId={setModelOverrideId}
           preserveExif={preserveExif}
           setPreserveExif={setPreserveExif}
           aiDecision={aiDecision}
@@ -382,6 +579,7 @@ function App() {
           webpLossless={webpLossless}
           setWebpLossless={setWebpLossless}
           isAnimated={isAnimatedInput}
+          usingCloudTemporal={useCloudTemporal}
           animatedOutputIsApng={animatedOutputIsApng}
           enhancementStrength={enhancementStrength}
           setEnhancementStrength={setEnhancementStrength}
@@ -488,6 +686,17 @@ function App() {
               </div>
             </div>
 
+            {canUseCloudTemporal && (
+              <CloudTemporalControls
+                enabled={cloudTemporalOptIn}
+                setEnabled={setCloudTemporalOptIn}
+                consent={cloudUploadConsent}
+                setConsent={setCloudUploadConsent}
+                outputFormat={cloudTemporalOutputFormat}
+                setOutputFormat={setCloudTemporalOutputFormat}
+              />
+            )}
+
             {/* Boundary rule preview (issue #8, AC #4): when the chosen goal does
                 not exceed the source, the orchestrator will skip the upscale and
                 surface `noUpscale`. We tell the user *before* they run so it's
@@ -513,14 +722,21 @@ function App() {
                     <Loader2 className="animate-spin" /> Upscaling…
                   </>
                 ) : triggerDisabled ? (
-                  <>Target not larger than source</>
+                  cloudConsentMissing ? <>Confirm upload consent</> : <>Target not larger than source</>
+                ) : useCloudTemporal ? (
+                  <>Start cloud temporal enhancement</>
                 ) : (
                   <>Upscale to {label}</>
                 )}
               </Button>
               {status === "processing" && (
                 <>
-                  {decodeProgress?.phase === "heic-converting" ? (
+                  {useCloudTemporal ? (
+                    <p data-testid="progress" className="text-sm text-muted-foreground">
+                      Uploading the original animation to the cloud GPU service after
+                      explicit consent — this may take a moment.
+                    </p>
+                  ) : decodeProgress?.phase === "heic-converting" ? (
                     <p data-testid="heic-converting-notice" className="text-sm text-muted-foreground">
                       Converting your HEIC photo in the browser. The converter
                       loads once on first use and is cached afterwards; the
@@ -540,12 +756,12 @@ function App() {
                     </p>
                   ) : (
                     <p data-testid="progress" className="text-sm text-muted-foreground">
-                      Processing entirely in your browser — this may take a moment.
+                      Processing locally in your browser — this may take a moment.
                     </p>
                   )}
                 </>
               )}
-              {status === "error" && error && (
+              {status === "error" && error && !cloudJob && (
                 <p data-testid="error" className="text-sm text-destructive">{error}</p>
               )}
               {status === "done" && result && (
@@ -565,6 +781,18 @@ function App() {
               </Button>
             )}
           </section>
+        )}
+
+        {cloudJob && (
+          <CloudJobPanel
+            job={cloudJob}
+            result={cloudResult}
+            resultUrl={cloudResultUrl}
+            error={cloudRecoveryError ?? error}
+            deletePending={cloudDeletePending}
+            onRefresh={() => void refreshCloudJob(cloudJob.recovery)}
+            onDelete={() => void deleteCloudJob()}
+          />
         )}
 
         {/* Batch queue (issue #9). Available even without a single image loaded
@@ -640,10 +868,175 @@ function SiteFooter({ onOpenPrivacy }: { onOpenPrivacy: () => void }) {
         </a>
       </div>
       <p className="text-xs text-muted-foreground">
-        Free &amp; open source. No accounts, no uploads, no usage limits.
+        Local-first and open source. No accounts; cloud temporal enhancement only runs after explicit upload consent.
       </p>
     </footer>
   );
+}
+
+function cloudJobStatusMessage(job: CloudTemporalJob): string {
+  switch (job.status) {
+    case "uploading":
+      return "Uploading original animation";
+    case "queued":
+      return "Waiting for a GPU worker";
+    case "processing":
+      return "Enhancing frames with temporal consistency";
+    case "encoding":
+      return "Encoding the enhanced animation";
+    case "ready":
+      return "Ready to download";
+    case "failed":
+      return job.failure?.kind === "product-limit"
+        ? "Rejected by cloud limits"
+        : "Cloud processing failed";
+    case "expired":
+      return "Recovery window expired";
+    case "deleted":
+      return "Cloud job deleted";
+  }
+}
+
+function cloudFailureDetails(job: CloudTemporalJob, error: string | null): string | null {
+  if (job.failure) {
+    const prefix = job.failure.kind === "product-limit" ? "Limit" : "Processing";
+    return `${prefix}: ${job.failure.message}`;
+  }
+  if (job.status === "expired") return "The retained cloud result is no longer available.";
+  if (job.status === "deleted") return "The cloud source and result have been deleted.";
+  return error;
+}
+
+function CloudJobPanel({
+  job,
+  result,
+  resultUrl,
+  error,
+  deletePending,
+  onRefresh,
+  onDelete,
+}: {
+  job: CloudTemporalJob;
+  result: CloudTemporalJobResult | null;
+  resultUrl: string | null;
+  error: string | null;
+  deletePending: boolean;
+  onRefresh: () => void;
+  onDelete: () => void;
+}) {
+  const detail = cloudFailureDetails(job, error);
+  const inFlight = !isTerminalCloudTemporalStatus(job.status);
+  const canDelete = job.status !== "deleted" && job.status !== "expired" && !deletePending;
+  const recoveryUrl = `${window.location.pathname}${window.location.search}${job.recovery.url}`;
+  const retentionNotice = cloudRetentionNotice(job);
+  const deleteButtonLabel = deletePending
+    ? "Deleting..."
+    : job.status === "deleted"
+      ? "Deleted"
+      : job.status === "expired"
+        ? "Expired"
+        : "Delete now";
+  return (
+    <section data-testid="cloud-job-panel" className="flex flex-col gap-4 rounded-lg border border-border p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium">Cloud temporal job</p>
+          <p data-testid="cloud-job-status" className="text-sm text-muted-foreground">
+            {cloudJobStatusMessage(job)} ({job.status})
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Job {job.id} · output {job.request.outputFormat.toUpperCase()} · strength {job.request.enhancementStrength}%
+          </p>
+          <p data-testid="cloud-job-retention" className="text-xs text-muted-foreground">
+            {retentionNotice}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onRefresh} data-testid="cloud-job-refresh">
+            <RefreshCw /> Refresh
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onDelete}
+            disabled={!canDelete}
+            data-testid="cloud-job-delete"
+          >
+            <Trash2 /> {deleteButtonLabel}
+          </Button>
+        </div>
+      </div>
+
+      {inFlight && (
+        <p data-testid="cloud-job-progress" className="text-sm text-muted-foreground">
+          You can keep this page open while the job moves through upload, queue,
+          processing, and encoding. The recovery link works until the retention deadline.
+        </p>
+      )}
+
+      {detail && (
+        <p data-testid="cloud-job-detail" className={job.status === "failed" ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
+          {detail}
+        </p>
+      )}
+
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">Recovery link</span>
+        <input
+          data-testid="cloud-recovery-link"
+          readOnly
+          value={recoveryUrl}
+          className="rounded-md border border-input bg-background px-3 py-2 text-xs text-muted-foreground"
+        />
+      </label>
+
+      {job.status === "ready" && job.result && resultUrl && result && (
+        <div className="flex flex-col gap-3" data-testid="cloud-result-ready">
+          <p className="text-sm text-muted-foreground">
+            Result: {job.result.width} × {job.result.height}px, {job.result.frameCount} frames,
+            {" "}{formatBytes(job.result.byteSize)}, model {job.result.modelId}.
+          </p>
+          <Button asChild size="lg" variant="secondary" className="w-fit">
+            <a data-testid="cloud-result-download" href={resultUrl} download={result.downloadName}>
+              <Download /> Download cloud {result.format.toUpperCase()}
+            </a>
+          </Button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function cloudRetentionNotice(job: CloudTemporalJob): string {
+  if (job.status === "expired") {
+    return `Retention expired at ${formatRetentionDeadline(job.expiresAt)}; source and result bytes are no longer available.`;
+  }
+  if (job.status === "deleted") {
+    return `Deleted by request. Source and result bytes are no longer recoverable.`;
+  }
+  return `Retained until ${formatRetentionDeadline(job.expiresAt)}. Source and result bytes are automatically deleted after this window.`;
+}
+
+function formatRetentionDeadline(expiresAt: number): string {
+  if (!Number.isFinite(expiresAt)) return "the retention deadline";
+  const absolute = new Date(expiresAt).toLocaleString();
+  const remainingMs = expiresAt - Date.now();
+  if (remainingMs <= 0) return `${absolute} (expired)`;
+  const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60_000));
+  if (remainingMinutes < 60) return `${absolute} (about ${remainingMinutes} min left)`;
+  const remainingHours = Math.ceil(remainingMinutes / 60);
+  return `${absolute} (about ${remainingHours} hr left)`;
+}
+
+function recoveryFromHash(hash: string): CloudTemporalRecoveryIdentity | null {
+  const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!raw) return null;
+  const params = new URLSearchParams(raw);
+  const jobId = params.get("cloud-job");
+  const token = params.get("token");
+  if (!jobId || !token) return null;
+  return { jobId, token, url: `#cloud-job=${encodeURIComponent(jobId)}&token=${encodeURIComponent(token)}` };
 }
 
 /** Read natural dimensions from an object URL via a temporary <img>. */
@@ -718,6 +1111,10 @@ interface SettingsControlsProps {
   source: SourceImage | null;
   contentTypeOverride: "auto" | ContentType;
   setContentTypeOverride: (ct: "auto" | ContentType) => void;
+  modelRoutingDecision: ReturnType<typeof resolveModelRouting>;
+  modelRoutingContext: Parameters<typeof resolveModelRouting>[0];
+  modelOverrideId: string;
+  setModelOverrideId: (id: string) => void;
   preserveExif: boolean;
   setPreserveExif: (v: boolean) => void;
   /** AI-capability decision (null while the probe is pending). */
@@ -731,6 +1128,8 @@ interface SettingsControlsProps {
   /** Whether the loaded source is animated (issue #29): the output format
    *  selector becomes read-only and shows the device-determined container. */
   isAnimated: boolean;
+  /** Whether this run is explicitly using cloud temporal enhancement. */
+  usingCloudTemporal: boolean;
   /** Whether the animated output will be APNG (WebCodecs present) vs GIF.
    *  Mirrors the worker's codec-pair resolution so the label never disagrees
    *  with the bytes (ADR-0007). */
@@ -771,6 +1170,10 @@ function SettingsControls({
   source,
   contentTypeOverride,
   setContentTypeOverride,
+  modelRoutingDecision,
+  modelRoutingContext,
+  modelOverrideId,
+  setModelOverrideId,
   preserveExif,
   setPreserveExif,
   aiDecision,
@@ -781,6 +1184,7 @@ function SettingsControls({
   enhancementStrength,
   setEnhancementStrength,
   isAnimated,
+  usingCloudTemporal,
   animatedOutputIsApng,
 }: SettingsControlsProps) {
   return (
@@ -947,23 +1351,28 @@ function SettingsControls({
         </div>
       )}
 
-      {/* Enhancement strength (ADR-0008, issue #40/#41): an AI-only slider that
-          controls the alpha blend between the AI reconstruction and the faithful
-          Lanczos output. At 100% (default) the run is byte-identical to v1–v3;
-          below 100% the blending upscaler (#38) composes the two outputs. The
-          control is shown only for AI mode + still images — animated inputs hide
-          it. When AI mode is selected with an animated source, an honest message
-          states why (ADR-0008: blending the AI first frame against faithful
-          subsequent frames causes visible frame-to-frame inconsistency), rather
-          than silently omitting the control. Animated AI first-frame enhancement
-          stays at α = 1 (pure AI) — see runUpscale. */}
-      {mode === "ai" && !isAnimated && (
+      {mode === "ai" && (!isAnimated || usingCloudTemporal) && (
+        <ModelRoutingControl
+          decision={modelRoutingDecision}
+          context={modelRoutingContext}
+          overrideId={modelOverrideId}
+          setOverrideId={setModelOverrideId}
+        />
+      )}
+
+      {/* Enhancement strength (ADR-0008, issue #40/#41/#62): an AI-only control
+          that drives the alpha blend for still images and the uniform strength for
+          cloud temporal jobs. Local animated AI keeps it hidden because blending
+          the AI first frame against faithful subsequent frames causes visible
+          frame-to-frame inconsistency; opting into cloud temporal makes the whole
+          animation consistent, so the same presets and slider apply. */}
+      {mode === "ai" && (!isAnimated || usingCloudTemporal) && (
         <EnhancementStrengthControl
           enhancementStrength={enhancementStrength}
           setEnhancementStrength={setEnhancementStrength}
         />
       )}
-      {mode === "ai" && isAnimated && (
+      {mode === "ai" && isAnimated && !usingCloudTemporal && (
         <p className="text-xs text-muted-foreground" data-testid="enhancement-strength-unavailable">
           Enhancement strength is available for still images only. Blending the
           AI-enhanced first frame against faithfully upscaled later frames would
@@ -1004,6 +1413,185 @@ function SettingsControls({
   );
 }
 
+interface CloudTemporalControlsProps {
+  enabled: boolean;
+  setEnabled: (v: boolean) => void;
+  consent: boolean;
+  setConsent: (v: boolean) => void;
+  outputFormat: CloudTemporalOutputFormat;
+  setOutputFormat: (format: CloudTemporalOutputFormat) => void;
+}
+
+/**
+ * Cloud temporal enhancement opt-in (v5 issue #58).
+ *
+ * Rendered only for animated inputs in AI mode. Local processing remains the
+ * default; the cloud path requires a separate upload-consent checkbox before a
+ * job can be created, so selecting AI mode alone never sends source bytes away.
+ * APNG is the default cloud output; GIF is an explicit compatibility export with
+ * a 256-colour/lower-fidelity trade-off.
+ */
+function CloudTemporalControls({
+  enabled,
+  setEnabled,
+  consent,
+  setConsent,
+  outputFormat,
+  setOutputFormat,
+}: CloudTemporalControlsProps) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border p-4" data-testid="cloud-temporal-control">
+      <label className="flex items-start gap-3 text-sm">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => {
+            const next = e.target.checked;
+            setEnabled(next);
+            if (!next) setConsent(false);
+          }}
+          data-testid="cloud-temporal-toggle"
+          className="mt-1 size-4 rounded border-input"
+        />
+        <span>
+          <span className="block font-medium">Use cloud temporal enhancement</span>
+          <span className="block text-muted-foreground">
+            Best-quality animated AI: uploads the original animation to a GPU
+            service so the whole animation can be enhanced with temporal
+            consistency. Local animated AI remains first-frame-only.
+          </span>
+        </span>
+      </label>
+      {enabled && (
+        <div className="flex flex-col gap-2" data-testid="cloud-output-format-control">
+          <p className="text-sm font-medium">Cloud output format</p>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              data-testid="cloud-output-format-apng"
+              aria-pressed={outputFormat === "apng"}
+              onClick={() => setOutputFormat("apng")}
+              className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+                outputFormat === "apng"
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input hover:bg-accent"
+              }`}
+            >
+              <span className="block font-medium">APNG</span>
+              <span className="block text-xs opacity-80">Default quality-preserving export with true colour and transparency.</span>
+            </button>
+            <button
+              type="button"
+              data-testid="cloud-output-format-gif"
+              aria-pressed={outputFormat === "gif"}
+              onClick={() => setOutputFormat("gif")}
+              className={`rounded-lg border px-4 py-3 text-left text-sm transition-colors ${
+                outputFormat === "gif"
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input hover:bg-accent"
+              }`}
+            >
+              <span className="block font-medium">GIF compatibility</span>
+              <span className="block text-xs opacity-80">256-colour, lower-fidelity export for apps that cannot play APNG.</span>
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground" data-testid="cloud-output-format-hint">
+            {outputFormat === "apng"
+              ? "APNG is the default cloud output because it preserves true colour and transparency."
+              : "GIF compatibility is 256-colour and lower-fidelity; choose it only when APNG playback support matters."}
+          </p>
+        </div>
+      )}
+      {enabled && (
+        <label className="flex items-start gap-3 text-sm" data-testid="cloud-upload-consent-control">
+          <input
+            type="checkbox"
+            checked={consent}
+            onChange={(e) => setConsent(e.target.checked)}
+            data-testid="cloud-upload-consent"
+            className="mt-1 size-4 rounded border-input"
+          />
+          <span className="text-muted-foreground">
+            I understand the original animated file will leave this device and be
+            uploaded to a remote GPU service for processing.
+          </span>
+        </label>
+      )}
+    </div>
+  );
+}
+
+interface ModelRoutingControlProps {
+  decision: ReturnType<typeof resolveModelRouting>;
+  context: Parameters<typeof resolveModelRouting>[0];
+  overrideId: string;
+  setOverrideId: (id: string) => void;
+}
+
+function ModelRoutingControl({
+  decision,
+  context,
+  overrideId,
+  setOverrideId,
+}: ModelRoutingControlProps) {
+  const selectableModels = selectableModelsForContext(context);
+  const unavailableModels = MODEL_CATALOG.filter((model) => !selectableModels.includes(model));
+  return (
+    <div className="flex flex-col gap-3" data-testid="model-routing-control">
+      <div className="flex flex-col gap-1">
+        <p className="text-sm font-medium">Model routing</p>
+        <p className="text-xs text-muted-foreground" data-testid="model-routing-recommendation">
+          Automatic recommendation: {decision.model.displayName}. {decision.model.description}
+        </p>
+        <p className="text-xs text-muted-foreground" data-testid="model-routing-limitations">
+          {modelLimitationSummary(decision.model, context)}
+        </p>
+        {decision.reason && (
+          <p className="text-xs text-muted-foreground" data-testid="model-routing-fallback">
+            {decision.reason}
+          </p>
+        )}
+      </div>
+      <label className="flex flex-col gap-1 text-sm">
+        <span className="font-medium">Expert model override</span>
+        <select
+          value={overrideId}
+          onChange={(e) => setOverrideId(e.target.value)}
+          data-testid="model-routing-override"
+          className="rounded-md border border-input bg-background px-3 py-2 text-sm"
+        >
+          <option value="auto">Automatic — best model for this run</option>
+          {selectableModels.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.displayName} — {modelPickerLabel(model)}
+            </option>
+          ))}
+          {unavailableModels.map((model) => (
+            <option key={model.id} value={model.id} disabled>
+              {model.displayName} — {modelLimitationSummary(model, context)}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+function selectableModelsForContext(context: Parameters<typeof resolveModelRouting>[0]): AiModelMetadata[] {
+  return MODEL_CATALOG.filter((model) =>
+    model.availabilityState === "available" &&
+    model.availability.includes(context.runtimeTarget) &&
+    model.supportedSourceTypes.includes(context.sourceType)
+  );
+}
+
+function modelPickerLabel(model: AiModelMetadata): string {
+  const runtime = model.runtimeTarget === "cloud" ? "cloud" : "local";
+  const stability = model.stability === "experimental" ? "experimental" : "stable";
+  const alpha = model.alphaSupport === "rgb-only" ? "RGB-only" : "alpha-aware";
+  return `${runtime}, ${stability}, ${alpha}`;
+}
+
 interface EnhancementStrengthControlProps {
   /** The user's 0–100% selection. */
   enhancementStrength: number;
@@ -1013,17 +1601,13 @@ interface EnhancementStrengthControlProps {
 /**
  * The enhancement-strength slider (v4, ADR-0008, issue #40).
  *
- * A continuous 0–100% control in AI mode for still images. It maps linearly to
- * the alpha-blend ratio the blending upscaler (#38) applies: 0% → pure faithful
- * (Lanczos), 100% → pure AI reconstruction (the default, byte-identical to
- * v1–v3). The honest end-labels state exactly that so the user is never in doubt
- * about what "0%" and "100%" mean.
+ * A continuous 0–100% control in AI mode for still images and cloud temporal
+ * jobs. The v5 presets are shortcuts over the same value: selecting one moves the
+ * slider, and the user can still fine-tune afterward.
  *
- * Rendered only in AI mode + still image. The caller gates both: faithful mode
- * has no AI to blend, and animated inputs hide the slider (ADR-0008: blending
- * the AI first frame against faithful subsequent frames causes visible
- * frame-to-frame inconsistency). The animated-hide messaging lands in #41; here
- * the component is simply not rendered for an animated source.
+ * Rendered for still-image AI and for cloud temporal enhancement. Local animated
+ * AI keeps it hidden (ADR-0008: blending the AI first frame against faithful
+ * subsequent frames causes visible frame-to-frame inconsistency).
  */
 function EnhancementStrengthControl({
   enhancementStrength,
@@ -1036,6 +1620,31 @@ function EnhancementStrengthControl({
         <span className="text-sm tabular-nums text-muted-foreground" data-testid="enhancement-strength-value">
           {enhancementStrength}%
         </span>
+      </div>
+      <div className="flex flex-col gap-2" data-testid="enhancement-preset-control">
+        <p className="text-xs font-medium text-muted-foreground">Presets</p>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {ENHANCEMENT_PRESETS.map((preset) => {
+            const selected = enhancementStrength === preset.value;
+            return (
+              <button
+                key={preset.label}
+                type="button"
+                data-testid={`enhancement-preset-${preset.value}`}
+                aria-pressed={selected}
+                onClick={() => setEnhancementStrength(preset.value)}
+                className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                  selected
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-input hover:bg-accent"
+                }`}
+              >
+                <span className="block font-medium">{preset.label}</span>
+                <span className="block opacity-80">{preset.value}%</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
       <input
         type="range"
@@ -1052,8 +1661,9 @@ function EnhancementStrengthControl({
         <span>100% — full AI</span>
       </div>
       <p className="text-xs text-muted-foreground">
-        Blends the AI-enhanced result with the faithful Lanczos upscale. Lower
-        values keep more of the original's natural texture.
+        For still images, blends the AI-enhanced result with the faithful Lanczos
+        upscale. For cloud temporal enhancement, one strength applies across the
+        whole animation.
       </p>
     </div>
   );

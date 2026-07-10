@@ -11,6 +11,7 @@
  * runtime message rather than a silent 404 on the AI path.
  */
 import type { ContentType } from "../types";
+import { getModelMetadata } from "../modelRouting";
 
 export interface ModelAssetDescriptor {
   /** Cache + registry key. Bumped when the hosted weights change. */
@@ -47,6 +48,27 @@ function requireUrl(envKey: string): string {
 export function getModelAsset(content: ContentType): ModelAssetDescriptor {
   switch (content) {
     case "photo":
+      return localModelAsset("photo");
+    case "anime":
+      return localModelAsset("anime");
+    default: {
+      const _exhaustive: never = content;
+      throw new Error(`No AI model is registered for content "${_exhaustive}".`);
+    }
+  }
+}
+
+export function getModelAssetById(modelId: string): ModelAssetDescriptor {
+  const metadata = getModelMetadata(modelId);
+  if (!metadata || metadata.runtimeTarget !== "local") {
+    throw new Error(`No local AI model is registered with id "${modelId}".`);
+  }
+  return localModelAsset(metadata.preferredContentTypes[0]);
+}
+
+function localModelAsset(content: ContentType): ModelAssetDescriptor {
+  switch (content) {
+    case "photo":
       return {
         id: "real-esrgan-general-x4-v1",
         content: "photo",
@@ -64,9 +86,5 @@ export function getModelAsset(content: ContentType): ModelAssetDescriptor {
         inputName: "input",
         outputName: "output",
       };
-    default: {
-      const _exhaustive: never = content;
-      throw new Error(`No AI model is registered for content "${_exhaustive}".`);
-    }
   }
 }

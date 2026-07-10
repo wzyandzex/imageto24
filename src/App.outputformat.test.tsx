@@ -9,7 +9,7 @@
 // Mirrors the mocking pattern in App.resolution.test.tsx: the worker and the
 // browser capability probe are stubbed so the test runs in jsdom.
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 vi.mock("@/pipeline/browser/runInWorker", () => ({
   processImageInWorker: vi.fn(),
@@ -27,6 +27,12 @@ import App from "@/App";
 async function renderApp() {
   render(<App />);
   await screen.findByRole("heading", { name: "imageto24", level: 1 });
+}
+
+async function switchToAiMode() {
+  await waitFor(() => expect(screen.getByTestId("mode-ai")).toHaveAttribute("aria-disabled", "false"));
+  fireEvent.click(screen.getByTestId("mode-ai"));
+  await waitFor(() => expect(screen.getByTestId("mode-ai")).toHaveAttribute("aria-selected", "true"));
 }
 
 beforeEach(() => {
@@ -64,7 +70,7 @@ describe("output format selector — AI mode permits the full matrix", () => {
   it("switches to AI mode and selects JPEG", async () => {
     await renderApp();
     // AI mode is available (WebGPU + budget present).
-    fireEvent.click(screen.getByTestId("mode-ai"));
+    await switchToAiMode();
     fireEvent.click(screen.getByTestId("output-format-jpeg"));
     expect(screen.getByTestId("output-format-jpeg")).toHaveAttribute("aria-pressed", "true");
     // JPEG card is not disabled under AI mode.
@@ -73,7 +79,7 @@ describe("output format selector — AI mode permits the full matrix", () => {
 
   it("exposes the WebP lossless/lossy toggle under AI mode", async () => {
     await renderApp();
-    fireEvent.click(screen.getByTestId("mode-ai"));
+    await switchToAiMode();
     fireEvent.click(screen.getByTestId("output-format-webp"));
     // The lossless toggle renders and is usable under AI mode.
     const toggle = screen.getByTestId("webp-lossless-toggle") as HTMLInputElement;
@@ -114,7 +120,7 @@ describe("output format selector — faithful lossless promise (issue #10 AC)", 
     // and surfaced via the hint, not by mutating the selection.
     await renderApp();
     // Pick JPEG under AI mode first.
-    fireEvent.click(screen.getByTestId("mode-ai"));
+    await switchToAiMode();
     fireEvent.click(screen.getByTestId("output-format-jpeg"));
     expect(screen.getByTestId("output-format-jpeg")).toHaveAttribute("aria-pressed", "true");
     // Switch to faithful: the selection is NOT rewritten — JPEG stays pressed.

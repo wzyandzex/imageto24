@@ -22,4 +22,6 @@ The alpha blend is the only option that is deterministic, runs in constant time 
 
 ## Consequence
 
-The slider is hidden for animated inputs. Blending the AI-enhanced first frame (ADR-0006) against faithful-subsequent frames would make the first frame visibly different from the rest — frame-to-frame inconsistency. Rather than offer a control that degrades animation quality, the UI hides it for animations and states this honestly.
+The slider is hidden for local animated AI inputs. Blending the AI-enhanced first frame (ADR-0006) against faithful-subsequent frames would make the first frame visibly different from the rest — frame-to-frame inconsistency. Rather than offer a control that degrades local animation quality, the UI hides it for local animated AI and states this honestly.
+
+v5 cloud temporal enhancement is different: the whole animation is processed consistently, so enhancement strength and presets can apply to the complete animation with one uniform value across all frames.

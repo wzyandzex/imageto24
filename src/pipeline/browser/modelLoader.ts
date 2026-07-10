@@ -26,7 +26,7 @@ import type {
   ModelLoadProgressCb,
 } from "../types";
 import { readCachedModel, writeCachedModel } from "./modelCache";
-import { getModelAsset, type ModelAssetDescriptor } from "./modelConfig";
+import { getModelAsset, getModelAssetById, type ModelAssetDescriptor } from "./modelConfig";
 import {
   REAL_ESRGAN_INPUT,
   REAL_ESRGAN_OUTPUT,
@@ -145,7 +145,7 @@ function adaptSession(
  * Lazily load (and cache) a Real-ESRGAN model and return a ready-to-run
  * {@link AiModel}. Safe to call repeatedly: the cache short-circuits the network.
  *
- * @param content      which model to load (this slice: "photo" only).
+ * @param content      automatic content route, or fallback when no model id is provided.
  * @param onProgress   optional first-download progress callback.
  * @param preferWebGpu default true; the device gate (#5) disables AI entirely
  *   when no suitable EP exists, so by the time we get here WebGPU-or-WASM is
@@ -155,9 +155,10 @@ function adaptSession(
 export async function loadRealEsrganModel(
   content: ContentType,
   onProgress?: ModelLoadProgressCb,
+  modelId?: string,
   preferWebGpu = true,
 ): Promise<AiModel> {
-  const asset = getModelAsset(content);
+  const asset = modelId ? getModelAssetById(modelId) : getModelAsset(content);
 
   // Decide WebGPU vs WASM ONCE and use the same decision for both which ORT
   // bundle to import and which execution providers to request. Deriving both

@@ -9,6 +9,11 @@ interface ImportMetaEnv {
    * "unavailable" rather than 404'ing.
    */
   readonly VITE_MODEL_GENERAL_URL?: string;
+  /**
+   * Optional base URL for the independent cloud temporal GPU service. When absent,
+   * local/dev builds use the deterministic no-network fake tracer.
+   */
+  readonly VITE_CLOUD_TEMPORAL_ENDPOINT?: string;
 }
 
 interface ImportMeta {
