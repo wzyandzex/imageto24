@@ -192,3 +192,7 @@ export {
   type CloudTemporalSequenceDecoder,
   type CloudTemporalSequenceEncoder,
 } from "./cloudTemporalService";
+
+// HTTP adapter for the independent GPU service host (iteration C). Node-only
+// codec wiring lives under scripts/ so the browser bundle never pulls it in.
+export { handleCloudTemporalHttpRequest, type CloudTemporalHttpOptions } from "./cloudTemporalHttp";

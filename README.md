@@ -45,7 +45,24 @@ npm run preview    # preview the production build locally
 npm run typecheck  # tsc, no emit
 npm run test       # run the Vitest suite once
 npm run test:watch # Vitest in watch mode
+npm run cloud:temporal  # local cloud temporal GPU service host (port 8787)
 ```
+
+### Local cloud temporal service (optional)
+
+By default the browser uses a no-network fake job tracer. To exercise the real
+HTTP upload path against the independent service contract:
+
+```bash
+npm run cloud:temporal
+# in another shell
+echo VITE_CLOUD_TEMPORAL_ENDPOINT=http://127.0.0.1:8787 >> .env
+npm run dev
+```
+
+The MVP host decodes the original animated upload, upscales every frame, and
+re-encodes APNG/GIF. It does **not** ship production temporal model weights —
+those plug into the same service seam later.
 
 ## Deployment
 
