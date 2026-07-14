@@ -15,132 +15,22 @@
 import type {
   AnimatedDecoderDeps,
   AnimatedEncoderDeps,
-  DecodedAnimatedFrame,
   ImageData,
 } from "../types";
+import { decodeGifSequence } from "../decodeGifSequence";
 
 /* -------------------------------------------------------------------------- */
-/* Decoder (gifuct-js)                                                         */
+/* Decoder (gifuct-js) — shared compositing in decodeGifSequence               */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Decode an animated GIF into its per-frame, full-canvas {@link ImageData}.
- *
- * gifuct-js returns each frame as a *patch* (the sub-rect the frame actually
- * paints, at its `dims.left/top`), plus the previous frame's `disposalType`
- * telling us how to reset before drawing it. The standard compositing loop
- * composites every patch onto a persistent full-canvas buffer and yields a copy
- * per frame — so the upscaler receives an independent, disposal-resolved still
- * for each frame and never has to know GIF semantics.
- *
- * Disposal methods (per the GIF spec):
- *  - 0 (unspecified) / 1 (do not dispose): leave the canvas as-is.
- *  - 2 (restore to background): clear the previous frame's rect to transparent.
- *  - 3 (restore to previous): restore the pre-frame canvas — rare; we snapshot.
- *
- * Transparency is honoured by skipping patch pixels whose alpha is 0 (gifuct-js
- * sets alpha=0 for the transparent palette index when `buildImagePatches` is
- * true), so the composited frame carries the transparent regions forward.
+ * Browser binding for the shared GIF compositor. Lazy gifuct-js import and
+ * disposal compositing live in {@link decodeGifSequence} so the Node cloud host
+ * cannot drift from the browser path.
  */
 export const browserAnimatedGifDecoder: AnimatedDecoderDeps = {
-  async decodeAnimated(buffer: ArrayBuffer): Promise<DecodedAnimatedFrame[]> {
-    // Lazy-load so the codec never reaches a non-animated user's bundle.
-    const { parseGIF, decompressFrames } = await import("gifuct-js");
-
-    const parsed = parseGIF(buffer);
-    const width: number = parsed.lsd.width;
-    const height: number = parsed.lsd.height;
-    const frames = decompressFrames(parsed, true) as ReadonlyArray<{
-      dims: { top: number; left: number; width: number; height: number };
-      delay: number;
-      disposalType: number;
-      patch: Uint8ClampedArray;
-    }>;
-
-    // Persistent compositor canvas (RGBA). Starts fully transparent.
-    const canvas = new Uint8ClampedArray(width * height * 4);
-    // Snapshot kept for disposal type 3 (restore to previous) — the canvas
-    // state before the *previous* frame was drawn.
-    let previousSnapshot: Uint8ClampedArray | undefined;
-
-    const decoded: DecodedAnimatedFrame[] = [];
-    for (const frame of frames) {
-      const { left, top, width: fw, height: fh } = frame.dims;
-
-      // Composite the patch into the canvas at its offset, honouring alpha.
-      // gifuct-js's `patch` is RGBA (w*h*4); alpha=0 means "transparent", so we
-      // skip those pixels and let whatever is underneath show through.
-      for (let y = 0; y < fh; y++) {
-        for (let x = 0; x < fw; x++) {
-          const srcIdx = (y * fw + x) * 4;
-          const alpha = frame.patch[srcIdx + 3];
-          if (alpha === 0) continue; // transparent — leave the underlying pixel
-          const dstIdx = ((top + y) * width + (left + x)) * 4;
-          canvas[dstIdx] = frame.patch[srcIdx];
-          canvas[dstIdx + 1] = frame.patch[srcIdx + 1];
-          canvas[dstIdx + 2] = frame.patch[srcIdx + 2];
-          canvas[dstIdx + 3] = alpha;
-        }
-      }
-
-      // Yield a *copy* of the full canvas as this frame's ImageData. Copying is
-      // required: the next frame mutates `canvas`, and the upscaler must see the
-      // frame as it was at this instant.
-      const imageData: ImageData = {
-        width,
-        height,
-        data: new Uint8ClampedArray(canvas),
-      };
-      decoded.push({
-        imageData,
-        // gifuct-js reports delay already in milliseconds (gce.delay × 10); a
-        // missing/zero delay is coerced to the GIF default of 100ms.
-        delay: frame.delay || 100,
-        disposalType: frame.disposalType,
-      });
-
-      // Apply the disposal rule for the frame we just drew, *before* the next
-      // frame composites on top.
-      switch (frame.disposalType) {
-        case 3:
-          // Restore to the state before this frame was drawn.
-          if (previousSnapshot) canvas.set(previousSnapshot);
-          break;
-        case 2:
-          // Restore to background: clear this frame's rect to transparent.
-          clearRect(canvas, width, left, top, fw, fh);
-          break;
-        case 0:
-        case 1:
-        default:
-          // Leave the canvas as-is; the next frame composites over it.
-          break;
-      }
-
-      // Snapshot for a potential future disposal=3 (taken *after* compositing
-      // but *before* any disposal 2/3 modifies the canvas — so it represents the
-      // "current frame drawn" state a later restore-to-previous would target).
-      previousSnapshot = new Uint8ClampedArray(canvas);
-    }
-
-    return decoded;
-  },
+  decodeAnimated: decodeGifSequence,
 };
-
-/** Zero out a sub-rect of an RGBA buffer (disposal type 2: restore to bg). */
-function clearRect(
-  canvas: Uint8ClampedArray,
-  canvasWidth: number,
-  left: number,
-  top: number,
-  w: number,
-  h: number,
-): void {
-  for (let y = 0; y < h; y++) {
-    const rowStart = ((top + y) * canvasWidth + left) * 4;
-    for (let x = 0; x < w * 4; x++) canvas[rowStart + x] = 0;
-  }
-}
 
 /* -------------------------------------------------------------------------- */
 /* Encoder (gifenc)                                                            */

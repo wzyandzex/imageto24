@@ -204,3 +204,6 @@ export {
   DEFAULT_CLOUD_TEMPORAL_MAX_BODY_BYTES,
   type CloudTemporalHttpOptions,
 } from "./cloudTemporalHttp";
+
+// Shared animated-GIF compositor (browser codec + Node cloud host).
+export { decodeGifSequence } from "./decodeGifSequence";
