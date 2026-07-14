@@ -1,6 +1,6 @@
 # Image Upscaling
 
-A browser-based tool that upscales images to high resolution (up to 4K) while preserving native image quality, with no server-side processing.
+A browser-based tool that upscales images to high resolution (up to 4K) while preserving native image quality. Local processing is the default; optional cloud temporal enhancement is upload-gated and limited to animated AI runs.
 
 ## Language
 
@@ -50,6 +50,10 @@ _Avoid_: Realistic image, normal image
 Drawn images with flat colors, hard edges, and clean lines. Handled by the Real-ESRGAN anime model, which avoids the artifacts the general model produces on this content.
 _Avoid_: Cartoon, drawing, 2D image
 
+**Model routing**:
+The decision that selects the AI model expected to produce the best result for a source. Routing is automatic by default, based on content type, input format, and whether the source is animated; expert users may override it manually. v5 prioritizes animation/video-friendly models for cloud temporal enhancement before broadening the still-image model catalogue.
+_Avoid_: Model selection (ambiguous about user vs system), model mode, AI type
+
 ### Delivery and limits
 
 **Device capability check**:
@@ -91,7 +95,7 @@ _Avoid_: Partial enhancement, single-frame (ambiguous with still images)
 ### Animated output (v3)
 
 **Animated output format**:
-The container a processed animated image is written to. Determined by device capability, not user choice: APNG when WebCodecs is available (true-colour, transparency), GIF when it is not (256-colour, the universal fallback). The user's still-output-format selection is irrelevant for animated inputs.
+The container a processed animated image is written to. For local browser processing, it is determined by device capability: APNG when WebCodecs is available (true-colour, transparency), GIF when it is not (256-colour, universal fallback). APNG inputs are always output as APNG. For cloud temporal enhancement, APNG is the default quality-preserving output, with GIF available only as an explicit compatibility export.
 _Avoid_: Output container, animated export
 
 **Animated codec**:
@@ -105,7 +109,7 @@ _Avoid_: Colour quality, colour accuracy, high colour
 ### Enhancement control (v4)
 
 **Enhancement strength**:
-A user-facing scalar (0–100%) controlling how aggressively the AI model's output replaces the original in AI mode. Implemented as an alpha-blend ratio, not a model parameter: at 0% the output equals faithful Lanczos, at 100% it equals pure AI reconstruction, and in between the two are linearly blended per pixel. Only available for still images in AI mode; hidden for animated inputs (blending the AI-enhanced first frame against faithful subsequent frames causes visible frame-to-frame inconsistency).
+A user-facing scalar (0–100%) controlling how aggressively the AI model's output replaces the original in AI mode. Implemented locally as an alpha-blend ratio, not a model parameter: at 0% the output equals faithful Lanczos, at 100% it equals pure AI reconstruction, and in between the two are linearly blended per pixel. Available for still images in AI mode and for cloud temporal enhancement with one uniform strength across the whole animation. Hidden for local animated AI inputs, where blending an AI-enhanced first frame against faithful subsequent frames causes visible frame-to-frame inconsistency.
 _Avoid_: AI level, model intensity, sharpen amount
 
 **Alpha blend**:
@@ -116,3 +120,32 @@ _Avoid_: Mix, interpolation ratio, opacity
 The deep module that implements alpha blend behind a single seam. It runs the AI upscaler and the faithful upscaler on the same source, then blends their outputs at the given alpha. Invoked only when enhancement strength is below 100% (α < 1); at 100% the orchestrator calls the AI upscaler directly, skipping the redundant faithful pass.
 _Avoid_: Hybrid upscaler, mixed upscaler, dual upscaler
 
+**Enhancement preset**:
+A named shortcut for a specific enhancement strength value. Presets do not replace the 0–100% slider; selecting one moves the slider to its preset value, and the user can still fine-tune afterward. The v5 preset set is Natural 35%, Balanced 60%, Crisp 80%, and Full AI 100%.
+_Avoid_: Strength mode, AI preset (ambiguous with model preset), filter preset
+
+### Hybrid processing (v5)
+
+**Hybrid opt-in**:
+A processing boundary where local processing remains the default and privacy-preserving path, while a specific high-compute feature may send image bytes off-device only after the user explicitly chooses it. The user's ordinary still-image and faithful workflows remain local; cloud work is not an automatic fallback.
+_Avoid_: Cloud mode (too broad), server mode, hybrid upscaler (conflicts with blending upscaler)
+
+**Cloud temporal enhancement**:
+Enhancing an animated image through remote GPU processing with temporal awareness, so the output is AI-reconstructed consistently across frames rather than treating each frame as an unrelated still image. Used to avoid both first-frame-only inconsistency and per-frame AI flicker when the user wants the highest animated AI quality. It is an all-frames operation: animations that exceed product limits are rejected or routed back to local options rather than partially enhanced. The source uploaded for this path is the original animated file, not a browser-expanded frame sequence.
+_Avoid_: Cloud frame enhancement, server-side AI (too broad), AI animation (ambiguous), full enhancement (ambiguous)
+
+**Temporal frame sequence**:
+The server-side representation used for cloud temporal enhancement: decoded animation frames in playback order plus timing, transparency, disposal, and blend metadata. It is not a lossy video transcode; it exists so video/temporal models can process neighbouring frames while the service can rebuild an animated image afterward. When the temporal model only supports RGB, alpha is reconstructed separately with faithful interpolation or edge-aware preservation, then recombined with the enhanced RGB output.
+_Avoid_: Video conversion, frame upload, sprite sheet
+
+**Upload consent**:
+The explicit user action that authorizes source image bytes to leave the device for cloud temporal enhancement. It is required before any remote processing starts and is separate from selecting AI mode.
+_Avoid_: Permission (too generic), cloud enabled, accepted terms
+
+**Cloud retention window**:
+The short, automatic deletion period for uploaded source files and generated cloud results. It exists only so long-running jobs can complete and users can recover downloads after refresh or transient network failures; users can request immediate deletion.
+_Avoid_: Storage, history, backup
+
+**Cloud job**:
+An asynchronous cloud temporal enhancement run. It has visible stages such as uploading, queued, processing, encoding, ready, failed, expired, and deleted, and can be resumed through a recovery link during the cloud retention window.
+_Avoid_: Request, task (too generic), session

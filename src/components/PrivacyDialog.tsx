@@ -1,11 +1,10 @@
 /**
  * PrivacyDialog — the privacy & about surface (issue #11).
  *
- * The privacy claim is the core trust hook (ADR-0001, PRD user stories #36–38).
- * This dialog states it plainly and, crucially, makes it *verifiable*: it tells
- * the user exactly how to confirm "images never leave your device" for
- * themselves (DevTools → Network: no image bytes transmitted), and points at the
- * open source as the second, auditable layer of the proof.
+ * The privacy claim is the core trust hook (ADR-0001 narrowed by ADR-0009). This
+ * dialog states it plainly and, crucially, makes it *verifiable*: local runs do
+ * not upload image bytes, while v5 cloud temporal enhancement requires explicit
+ * user consent before the original animated file leaves the device.
  *
  * It also surfaces the honest scope notes the rest of the app already carries:
  * AI mode is non-lossless (detail is reconstructed, PRD #15), and HEIC is a v2
@@ -70,29 +69,31 @@ export function PrivacyDialog({ open, onClose }: PrivacyDialogProps) {
           </Button>
         </div>
 
-        {/* Layer 1 — local processing, verifiable. */}
+        {/* Layer 1 — local-first processing, verifiable. */}
         <section className="flex flex-col gap-2">
           <h3 className="flex items-center gap-2 text-sm font-medium">
-            <ShieldCheck className="size-4" /> Images never leave your device
+            <ShieldCheck className="size-4" /> Local by default, upload by consent
           </h3>
           <p className="text-sm text-muted-foreground">
-            All decoding, processing, and encoding runs entirely in your browser
-            via WebGPU and WebAssembly. There is no server and no upload — your
-            image bytes are never transmitted anywhere.
+            Faithful mode, still-image AI, and local animated processing run in
+            your browser via WebGPU and WebAssembly. Cloud temporal enhancement is
+            the explicit exception: it only starts after you opt in and confirm
+            that the original animated file will be uploaded to a GPU service.
           </p>
           <p className="text-sm text-muted-foreground">
-            You don't have to take our word for it. To verify:
+            You don't have to take our word for it. To verify local runs:
           </p>
           <ol className="ml-4 list-decimal space-y-1 text-sm text-muted-foreground">
             <li>
               Open your browser's DevTools (F12) and switch to the{" "}
               <strong>Network</strong> tab.
             </li>
-            <li>Upload and upscale an image.</li>
+            <li>Upload and run a local image upscale.</li>
             <li>
               You'll see a request for the page, and (only on first AI-mode use)
-              a request for the model file — but never a request carrying your
-              image. No image bytes are sent.
+              a request for the model file — but no request carrying your image
+              unless you explicitly choose cloud temporal enhancement and confirm
+              upload consent.
             </li>
           </ol>
         </section>
@@ -104,9 +105,10 @@ export function PrivacyDialog({ open, onClose }: PrivacyDialogProps) {
           </h3>
           <p className="text-sm text-muted-foreground">
             The full source is public under the MIT license. Because the code is
-            readable, you (or any auditor) can confirm the privacy claim directly
-            rather than trusting marketing. This is the second layer of the
-            privacy promise: no hidden upload path can exist in code you can read.
+            readable, you (or any auditor) can confirm the local-first privacy
+            boundary directly rather than trusting marketing. This is the second
+            layer of the privacy promise: upload paths are explicit, visible, and
+            reviewable in code.
           </p>
           <a
             href={SITE_LINKS.repo}
@@ -162,9 +164,10 @@ export function PrivacyDialog({ open, onClose }: PrivacyDialogProps) {
             <Heart className="size-4" /> Support the project
           </h3>
           <p className="text-sm text-muted-foreground">
-            imageto24 is free and always will be — there's no paid tier and no
-            usage limit, because the work runs on your own machine. If it's useful
-            to you, an optional donation helps cover hosting and future work.
+            imageto24 is free and open source. Local processing runs on your own
+            machine; cloud temporal enhancement is optional and may enforce
+            anonymous limits to protect GPU costs. If it's useful to you, an
+            optional donation helps cover hosting and future work.
           </p>
           <Button asChild variant="outline" size="sm" className="w-fit">
             <a

@@ -117,6 +117,23 @@ export {
   type ResolvedOutput,
 } from "./formats";
 
+export {
+  MODEL_CATALOG,
+  contentTypeForModel,
+  getModelMetadata,
+  isModelSelectable,
+  modelLimitationSummary,
+  resolveModelRouting,
+  type AiModelMetadata,
+  type ModelAlphaSupport,
+  type ModelAvailabilityState,
+  type ModelRoutingContext,
+  type ModelRoutingDecision,
+  type ModelRuntimeTarget,
+  type ModelSourceType,
+  type ModelStability,
+} from "./modelRouting";
+
 // Batch serial queue (issue #9): the multi-image pipeline. Serial by design —
 // each image is fully processed and released from memory before the next begins
 // (ADR-0001 browser-only memory constraint).
@@ -127,3 +144,76 @@ export {
   type BatchItemStatus,
   type BatchProgress,
 } from "./runBatch";
+
+// Cloud temporal enhancement job seam (v5 issue #57). This is the contract and
+// deterministic fake tracer used before any real GPU provider is wired in.
+export {
+  type CloudTemporalCreateJobPayload,
+  type CloudTemporalJob,
+  type CloudTemporalJobClient,
+  type CloudTemporalJobFailure,
+  type CloudTemporalJobRequestSnapshot,
+  type CloudTemporalJobResult,
+  type CloudTemporalJobResultSummary,
+  type CloudTemporalJobStatus,
+  type CloudTemporalModelRouting,
+  type CloudTemporalOutputFormat,
+  type CloudTemporalProcessingFailure,
+  type CloudTemporalProcessingFailureReason,
+  type CloudTemporalProductLimitFailure,
+  type CloudTemporalProductLimitReason,
+  type CloudTemporalProductLimits,
+  type CloudTemporalRecoveryIdentity,
+  type CloudTemporalSourceFile,
+  type CloudTemporalSourceFormat,
+  type CloudTemporalSourceMetadata,
+  type FakeCloudTemporalJobClientOptions,
+  CLOUD_TEMPORAL_ACCEPTED_SOURCE_FORMATS,
+  CLOUD_TEMPORAL_JOB_STATUSES,
+  DEFAULT_CLOUD_TEMPORAL_LIMITS,
+  FakeCloudTemporalJobClient,
+  cloudTemporalOutputMime,
+  cloudTemporalTimeoutFailure,
+  createFakeCloudTemporalJobClient,
+  isTerminalCloudTemporalStatus,
+  resolveCloudTemporalCreateLimitFailure,
+  type CloudTemporalCreateLimitContext,
+} from "./cloudTemporalJob";
+
+// GPU service MVP core (v5 issue #64): environment-agnostic implementation of
+// the independent service contract. HTTP/queue/storage/GPU providers are injected
+// around this all-or-nothing temporal pipeline.
+export {
+  CloudTemporalGpuService,
+  cloneCloudTemporalFrame,
+  createCloudTemporalGpuService,
+  type CloudTemporalEncodeOptions,
+  type CloudTemporalEnhanceOptions,
+  type CloudTemporalEnhancer,
+  type CloudTemporalFrame,
+  type CloudTemporalGpuServiceDeps,
+  type CloudTemporalGpuServiceOptions,
+  type CloudTemporalSequenceDecoder,
+  type CloudTemporalSequenceEncoder,
+} from "./cloudTemporalService";
+
+// HTTP adapter for the independent GPU service host (iteration C). Node-only
+// codec wiring lives under scripts/ so the browser bundle never pulls it in.
+export {
+  handleCloudTemporalHttpRequest,
+  DEFAULT_CLOUD_TEMPORAL_MAX_BODY_BYTES,
+  type CloudTemporalHttpOptions,
+} from "./cloudTemporalHttp";
+
+// Shared animated-GIF compositor + encoder (browser codec + Node cloud host).
+export { decodeGifSequence } from "./decodeGifSequence";
+export { encodeGifSequence, type EncodeGifSequenceOptions, type GifEncodeFrame } from "./encodeGifSequence";
+
+// Create-job rate limiting for the HTTP host (optional inject).
+export {
+  cloudTemporalClientKey,
+  createCloudTemporalRateLimiter,
+  type CloudTemporalRateLimitDecision,
+  type CloudTemporalRateLimitOptions,
+  type CloudTemporalRateLimiter,
+} from "./cloudTemporalRateLimit";

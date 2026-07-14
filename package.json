@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "A browser-based image upscaler. Free, open-source, privacy-first — no image bytes ever leave your device.",
+  "description": "A browser-based image upscaler. Free, open-source, local-first, with explicit upload consent for optional cloud temporal enhancement.",
   "license": "MIT",
   "scripts": {
     "copy:ort": "node scripts/copy-ort-wasm.mjs",
@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "cloud:temporal": "vite-node scripts/cloud-temporal-server.ts",
     "cf:deploy": "wrangler pages deploy dist"
   },
   "dependencies": {

@@ -105,7 +105,7 @@ export async function processImage(
     if (mode === "ai") {
       const contentType =
         options.contentType ?? classifyContent(imageData);
-      model = await deps.modelLoader.loadModel(contentType, onModelProgress);
+      model = await deps.modelLoader.loadModel(contentType, onModelProgress, options.modelId);
     }
 
     // When the tier/custom target's long edge differs from the native integer

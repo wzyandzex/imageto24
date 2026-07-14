@@ -339,7 +339,11 @@ export type ModelLoadProgressCb = (p: ModelLoadProgress) => void;
 
 /** Loads (and caches) an AI model, lazily. Environment-bound (fetch / IndexedDB). */
 export interface ModelLoaderDeps {
-  loadModel(content: ContentType, onProgress?: ModelLoadProgressCb): Promise<AiModel>;
+  loadModel(
+    content: ContentType,
+    onProgress?: ModelLoadProgressCb,
+    modelId?: string,
+  ): Promise<AiModel>;
 }
 
 /**
@@ -396,6 +400,8 @@ export interface ProcessImageOptions {
   readonly lossless: boolean;
   readonly preserveExif: boolean;
   readonly contentType?: ContentType;
+  /** Expert model override from the routing UI. Automatic routing leaves it absent. */
+  readonly modelId?: string;
   /**
    * Enhancement strength as the alpha blend ratio α ∈ [0,1] (v4, ADR-0008).
    * AI-mode only: α = 1 (the default) runs the AI upscaler directly; α < 1 runs

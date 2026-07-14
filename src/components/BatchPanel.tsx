@@ -14,27 +14,30 @@
  */
 import { useCallback, useRef, useState } from "react";
 import {
-  AlertCircle,
-  CheckCircle2,
   Download,
   Layers,
-  Loader2,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
+import { BatchItemList } from "@/components/batch/BatchItemList";
+import { ACCEPTED_INPUT } from "@/lib/imageFormat";
+import {
+  batchDownloadName,
+  batchItemsFromRows,
+  buildBatchRows,
+  countBatchByStatus,
+  emptyBatchProgress,
+} from "@/lib/batchHelpers";
 import { createBatchWorkerSession } from "@/pipeline/browser/runInWorker";
 import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import {
   outputExtension,
   outputMime,
   runBatch,
-  type BatchItem,
   type BatchProgress,
 } from "@/pipeline";
 import type {
   ContentType,
-  ImageFormat,
   ModelLoadProgress,
   OutputFormat,
   ProcessingMode,
@@ -60,20 +63,6 @@ interface BatchOptions {
    */
   outputFormat: OutputFormat;
   lossless: boolean;
-}
-
-/** A batch item plus its derived download URL once processed. */
-interface BatchRow {
-  id: string;
-  name: string;
-  buffer: ArrayBuffer;
-  format: ImageFormat;
-  /**
-   * null for an unsupported file the user picked: it enters the queue as a
-   * pre-failed item so the user sees *which* file was rejected, rather than it
-   * vanishing silently (PRD #27 — per-item resilience surfaces every failure).
-   */
-  formatError: string | null;
 }
 
 interface BatchPanelProps {
@@ -106,37 +95,18 @@ export function BatchPanel({ options }: BatchPanelProps) {
 
   const startBatch = useCallback(
     async (files: File[]) => {
-      // Read bytes + resolve format up front. An unsupported file is kept in the
-      // queue as a pre-failed item rather than dropped, so the user sees which
-      // file was rejected (per-item resilience, PRD #27).
-      const rows: BatchRow[] = [];
-      for (const file of files) {
-        const format = formatFromFile(file);
-        const buffer = await file.arrayBuffer();
-        rows.push({
-          id: `${file.name}-${rows.length}`,
-          name: file.name,
-          buffer,
-          format: format ?? "png",
-          formatError: format ? null : `Unsupported file type: ${file.type || file.name}`,
-        });
-      }
+      const rows = await buildBatchRows(files);
       if (rows.length === 0) return;
 
       setRunning(true);
       setState({
-        progress: emptyProgress(rows),
+        progress: emptyBatchProgress(rows),
         urls: new Map(),
         modelProgress: null,
         decodeProgress: null,
       });
 
-      const items: BatchItem[] = rows.map((r) => ({
-        id: r.id,
-        name: r.name,
-        buffer: r.buffer,
-        format: r.format,
-      }));
+      const items = batchItemsFromRows(rows);
 
       // One persistent worker for the whole batch (issue #46): the compiled ONNX
       // session stays warm and is reused across images instead of recompiling per
@@ -252,16 +222,14 @@ export function BatchPanel({ options }: BatchPanelProps) {
       if (!url) return;
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.${ext}`;
+      a.download = batchDownloadName(it.name, options.targetLabel, ext);
       setTimeout(() => a.click(), i * 250);
     });
-  }, [state, options.targetLabel]);
+  }, [state, options.outputFormat, options.targetLabel]);
 
   const progress = state?.progress;
-  const completed = progress?.completed ?? 0;
-  const total = progress?.total ?? 0;
-  const failedCount = progress?.items.filter((i) => i.status === "failed").length ?? 0;
-  const doneCount = progress?.items.filter((i) => i.status === "done").length ?? 0;
+  const { completed, total, done: doneCount, failed: failedCount } =
+    countBatchByStatus(progress);
 
   return (
     <section className="flex flex-col gap-4 rounded-xl border border-border p-5">
@@ -340,45 +308,12 @@ export function BatchPanel({ options }: BatchPanelProps) {
             )}
           </div>
 
-          {/* Per-item rows */}
-          <ul className="flex flex-col gap-1" data-testid="batch-list">
-            {progress.items.map((it) => (
-              <li
-                key={it.id}
-                data-testid={`batch-item-${it.id}`}
-                className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
-              >
-                <BatchStatusIcon status={it.status} />
-                <span className="truncate">{it.name}</span>
-                <span
-                  data-testid={`batch-status-${it.id}`}
-                  className="ml-auto shrink-0 text-xs text-muted-foreground"
-                >
-                  {it.status}
-                </span>
-                {it.status === "done" && state?.urls.get(it.id) && (
-                  <a
-                    data-testid={`batch-download-${it.id}`}
-                    href={state.urls.get(it.id)}
-                    download={`${it.name.replace(/\.[^.]+$/, "")}_${options.targetLabel}_upscaled.${outputExtension(options.outputFormat)}`}
-                    className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent"
-                    aria-label={`Download ${it.name}`}
-                  >
-                    <Download className="size-4" />
-                  </a>
-                )}
-                {it.status === "failed" && it.error && (
-                  <span
-                    data-testid={`batch-error-${it.id}`}
-                    title={it.error}
-                    className="inline-flex items-center gap-1 text-xs text-destructive"
-                  >
-                    <AlertCircle className="size-3.5" /> failed
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
+          <BatchItemList
+            progress={progress}
+            urls={state?.urls ?? new Map()}
+            targetLabel={options.targetLabel}
+            outputFormat={options.outputFormat}
+          />
 
           {/* Download all + summary */}
           {!running && doneCount > 0 && (
@@ -395,27 +330,4 @@ export function BatchPanel({ options }: BatchPanelProps) {
       )}
     </section>
   );
-}
-
-/** Row icon by status, with an honest colour per state. */
-function BatchStatusIcon({ status }: { status: BatchProgress["items"][number]["status"] }) {
-  switch (status) {
-    case "queued":
-      return <div className="size-2 rounded-full bg-muted-foreground/40" />;
-    case "processing":
-      return <Loader2 className="size-4 animate-spin text-primary" />;
-    case "done":
-      return <CheckCircle2 className="size-4 text-primary" />;
-    case "failed":
-      return <AlertCircle className="size-4 text-destructive" />;
-  }
-}
-
-/** Initial snapshot for a set of rows: all queued, nothing completed. */
-function emptyProgress(rows: BatchRow[]): BatchProgress {
-  return {
-    completed: 0,
-    total: rows.length,
-    items: rows.map((r) => ({ id: r.id, name: r.name, status: "queued" as const })),
-  };
 }

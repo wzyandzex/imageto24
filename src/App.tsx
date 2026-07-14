@@ -1,92 +1,62 @@
-import { useCallback, useRef, useState } from "react";
-import { Download, Heart, ImageIcon, Loader2, Lock, ShieldCheck, Sparkles, Upload } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Download, ImageIcon, Loader2, Lock, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BatchPanel } from "@/components/BatchPanel";
+import { CloudJobPanel } from "@/components/CloudJobPanel";
+import { CloudTemporalControls } from "@/components/CloudTemporalControls";
 import { PrivacyDialog } from "@/components/PrivacyDialog";
-import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
-import { SITE_LINKS } from "@/lib/siteLinks";
+import { SettingsControls } from "@/components/SettingsControls";
+import { SiteFooter } from "@/components/SiteFooter";
+import { ACCEPTED_INPUT } from "@/lib/imageFormat";
+import { formatBytes } from "@/lib/formatBytes";
+import { loadSourceImage } from "@/lib/loadSourceImage";
+import { buildCloudTemporalCreatePayload } from "@/lib/buildCloudTemporalPayload";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
+import { browserCloudTemporalJobClient } from "@/pipeline/browser/cloudTemporalClient";
 import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import { useRunReadiness } from "@/pipeline/useRunReadiness";
-import { detectAnimation, type AnimationScan } from "@/pipeline";
+import { useCloudJob } from "@/hooks/useCloudJob";
+import {
+  isTerminalCloudTemporalStatus,
+  resolveModelRouting,
+} from "@/pipeline";
 import { targetLabel } from "@/pipeline/runReadiness";
 import {
-  OUTPUT_FORMATS,
-  TIER_LONG_EDGE,
-  computeUpscaleFactor,
   outputExtension,
   outputMime,
   type AnimatedImageFormat,
-  type CapabilityDecision,
+  type CloudTemporalOutputFormat,
+  type CloudTemporalSourceFormat,
   type ContentType,
   type FrameProgress,
-  type ImageFormat,
   type ModelLoadProgress,
   type OutputFormat,
   type ProcessImageResult,
   type ProcessingMode,
   type ResolutionTier,
-  type TargetSpec,
   type UpscaleFactor,
   type UpscaleFactorResult,
 } from "@/pipeline";
-
-type Status = "idle" | "processing" | "done" | "error";
-
-/**
- * The three resolution-input modes (PRD §Resolution control). Each resolves to
- * a `TargetSpec` variant; the orchestrator's single `computeUpscaleFactor` path
- * handles all three. The UI keeps them visually distinct so the user never
- * wonders which goal they're expressing (issue #8, acceptance: "UI clearly
- * distinguishes the three input modes").
- */
-type ResolutionInputMode = "tier" | "factor" | "custom";
-
-interface SourceImage {
-  file: File;
-  buffer: ArrayBuffer;
-  format: ImageFormat;
-  url: string;
-  width: number;
-  height: number;
-  /**
-   * The animated-image scan (issue #16). Run cheaply on upload over the file's
-   * header — never a decode. Drives routing: `isAnimated` ⇒ `processAnimated`;
-   * everything else ⇒ `processImage`. Also carries the detection-only flags
-   * (`animatedWebp` / `apng`) for the honest "treated as a still in v2" notices.
-   */
-  animation: AnimationScan;
-}
-
-const TIERS: ResolutionTier[] = ["1080p", "2K", "4K"];
-const FACTORS: UpscaleFactor[] = [2, 3, 4];
+import type { ResolutionInputMode, SourceImage, Status } from "@/appTypes";
 
 function App() {
   const [source, setSource] = useState<SourceImage | null>(null);
   const [mode, setMode] = useState<ProcessingMode>("faithful");
   // Resolution control (issue #8): the three input modes and their values. All
-  // three resolve into a single `TargetSpec` (see {@link resolveTarget}) so the
-  // orchestrator's existing `computeUpscaleFactor` path — which already
-  // supports tier / factor / custom-long-edge — drives every run unchanged.
+  // three resolve into a single `TargetSpec` so the orchestrator's existing
+  // `computeUpscaleFactor` path drives every run unchanged.
   const [resMode, setResMode] = useState<ResolutionInputMode>("tier");
   const [tier, setTier] = useState<ResolutionTier>("4K");
   const [explicitFactor, setExplicitFactor] = useState<UpscaleFactor>(4);
   const [customLongEdgeText, setCustomLongEdgeText] = useState("");
   const [preserveExif, setPreserveExif] = useState(true);
   // Output format selection (issue #10): PNG / WebP / JPEG. Faithful mode
-  // constrains the *effective* output to PNG or lossless WebP (the lossless
-  // promise) — the orchestrator coerces defensively, and the UI also reflects
-  // that constraint by explaining which choices are lossless-only under faithful.
+  // constrains the *effective* output to PNG or lossless WebP.
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("png");
-  // The lossless/lossy toggle only applies to WebP under AI mode (PNG is always
-  // lossless; JPEG is always lossy). Ignored when not WebP.
+  // The lossless/lossy toggle only applies to WebP under AI mode.
   const [webpLossless, setWebpLossless] = useState(true);
-  // Enhancement strength (ADR-0008, issue #40): a 0–100% slider in AI mode
-  // that controls the alpha blend between the AI and faithful upscaled outputs.
-  // Defaults to 100% (pure AI) so existing behaviour is unchanged. Only shown
-  // for AI mode + still images; hidden for animated inputs (ADR-0008: blending
-  // the AI-enhanced first frame against faithful subsequent frames causes
-  // visible frame-to-frame inconsistency).
+  // Enhancement strength (ADR-0008, issue #40/#62): 0–100% slider for still AI
+  // alpha-blend and uniform cloud temporal strength. Defaults to 100% (pure AI).
   const [enhancementStrength, setEnhancementStrength] = useState(100);
   const [contentTypeOverride, setContentTypeOverride] = useState<"auto" | ContentType>("auto");
   const [status, setStatus] = useState<Status>("idle");
@@ -94,34 +64,37 @@ function App() {
   const [result, setResult] = useState<ProcessImageResult | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<ModelLoadProgress | null>(null);
-  // HEIC first-use indicator (PRD user story #5): the worker fires a one-shot
-  // "converting HEIC" decode-progress message before the heic2any transcode, so
-  // the UI can show the one-time converter load is underway. Cleared on settle.
+  // HEIC first-use indicator (PRD user story #5).
   const [decodeProgress, setDecodeProgress] = useState<DecodeProgress | null>(null);
-  // Per-frame progress for the animated-GIF path (issue #18, PRD story #10). The
-  // worker fires `frame-progress` after each frame's upscale, in frame order, so
-  // the UI can show the GIF advancing frame-by-frame instead of a blind spinner.
+  // Per-frame progress for the animated-GIF path (issue #18, PRD story #10).
   const [frameProgress, setFrameProgress] = useState<FrameProgress | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  // Privacy & about dialog (issue #11). Opened from the header chip and the
-  // footer; the dialog is the verifiable-privacy surface.
+  // Privacy & about dialog (issue #11).
   const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [cloudTemporalOptIn, setCloudTemporalOptIn] = useState(false);
+  const [cloudUploadConsent, setCloudUploadConsent] = useState(false);
+  const [cloudTemporalOutputFormat, setCloudTemporalOutputFormat] = useState<CloudTemporalOutputFormat>("apng");
+  const [modelOverrideId, setModelOverrideId] = useState<string>("auto");
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
 
-  // The single source of truth for the run's resolution goal, derived from the
-  // active input mode. `custom` with no/invalid entry → empty target (nothing
-  // resolvable → `computeUpscaleFactor` returns noUpscale), which the UI also
-  // surfaces as the boundary notice below.
-  // The run-readiness decision — one deep module (architecture review
-  // candidate #2) collapses the five concerns that used to be smeared across
-  // this component (capability probe, AI-cost gating, target resolution,
-  // boundary check, output resolution). The hook owns only the capability
-  // probe side effect; everything else is pure (`resolveRunReadiness`).
-  //
-  // The user's `mode` is NOT mutated here. When AI is unavailable the downgrade
-  // appears in `readiness.effectiveMode`, never as a silent rewrite — the old
-  // snap-back `useEffect` is gone.
+  const {
+    cloudJob,
+    setCloudJob,
+    cloudResult,
+    cloudResultUrl,
+    cloudRecoveryError,
+    cloudDeletePending,
+    setCloudResultDownload,
+    clearCloudJob,
+    refreshCloudJob,
+    deleteCloudJob,
+  } = useCloudJob(setStatus, setError);
+
+  // The run-readiness decision — one deep module collapses capability probe,
+  // AI-cost gating, target resolution, boundary check, and output resolution.
+  // The user's `mode` is NOT mutated here; when AI is unavailable the downgrade
+  // appears in `readiness.effectiveMode`.
   const { readiness } = useRunReadiness(
     source ? { width: source.width, height: source.height } : null,
     {
@@ -135,16 +108,21 @@ function App() {
     },
   );
   const { effectiveMode, aiDecision, target, factorResult, effectiveOutput, capability } = readiness;
-  // Animated output format is device-determined (ADR-0007, issue #29): the user
-  // does not choose it. A WebCodecs-capable device (ImageDecoder present) gets
-  // the true-colour APNG encoder (UPNG.js, cnum:0 — no quantization); a device
-  // without WebCodecs gets the 256-colour GIF encoder (gifenc) — an honest
-  // degrade, since no mature browser wasm lib decodes animated WebP per-frame
-  // and GIF is the only universally-decodable animated container there. The
-  // capability probe runs once on mount (useRunReadiness); this mirrors the
-  // exact `hasWebCodecs()` gate the worker uses when resolving the codec pair,
-  // so the label shown here can never disagree with the bytes the run emits.
+  // Animated output format is device-determined (ADR-0007, issue #29).
   const isAnimatedInput = !!source?.animation.isAnimated;
+  const canUseCloudTemporal = isAnimatedInput && effectiveMode === "ai";
+  const useCloudTemporal = canUseCloudTemporal && cloudTemporalOptIn;
+  const modelRoutingContentType = contentTypeOverride === "auto" ? undefined : contentTypeOverride;
+  const modelRoutingContext = {
+    runtimeTarget: useCloudTemporal ? "cloud" as const : "local" as const,
+    sourceType: isAnimatedInput && useCloudTemporal ? "animated" as const : "still" as const,
+    contentType: modelRoutingContentType,
+  };
+  const modelRoutingDecision = resolveModelRouting({
+    ...modelRoutingContext,
+    overrideModelId: modelOverrideId === "auto" ? undefined : modelOverrideId,
+  });
+  const cloudConsentMissing = useCloudTemporal && !cloudUploadConsent;
   // For an animated APNG the worker needs the APNG decoder format; every other
   // input (incl. still PNG) uses the source's resolved format. `source` is
   // guarded by `if (!source) return` in runUpscale, so the fallback is nominal.
@@ -163,49 +141,54 @@ function App() {
     ? animatedOutputMime
     : outputMime(effectiveOutput.format);
   const label = targetLabel(target);
-  // triggerDisabled from readiness + the separate "no source" guard the UI
-  // still owns (no run makes sense before an image is loaded).
-  const triggerDisabled = !source || readiness.triggerDisabled;
+  // Cloud temporal enhancement adds one extra gate: upload consent (ADR-0009).
+  const triggerDisabled = !source || readiness.triggerDisabled || cloudConsentMissing;
 
-  // Load a chosen file: read bytes, probe dimensions via an Image, stash state.
-  //
-  // HEIC is the one format the main thread cannot decode: there is no browser-
-  // native HEIC decoder, so `new Image()` fails and a real decode only happens
-  // in the worker (via heic2any, issue #15). For HEIC we therefore skip the
-  // dimension probe and stash the source with a 0×0 placeholder — the
-  // orchestrator computes the real factor from the decoded pixels, and
-  // `resolveRunReadiness` already tolerates a 0×0 source (tier/factor targets
-  // still resolve a factor; the boundary notice won't spuriously fire). The
-  // preview swaps in a placeholder card instead of a broken <img>.
+  useEffect(() => {
+    if (canUseCloudTemporal) return;
+    setCloudTemporalOptIn(false);
+    setCloudUploadConsent(false);
+    setCloudTemporalOutputFormat("apng");
+    setModelOverrideId("auto");
+  }, [canUseCloudTemporal]);
+
+  useEffect(() => {
+    if (modelOverrideId === "auto") return;
+    if (modelRoutingDecision.kind === "override") return;
+    setModelOverrideId("auto");
+  }, [modelOverrideId, modelRoutingDecision.kind, modelRoutingDecision.model.id]);
+
+  useEffect(() => {
+    return () => {
+      if (resultUrl) URL.revokeObjectURL(resultUrl);
+    };
+  }, [resultUrl]);
+
+  // Load a chosen file via the shared loader (bytes + animation scan + dims).
+  // HEIC skips the dimension probe (browser has no native decoder) and stashes
+  // 0×0; the orchestrator computes the real factor from decoded pixels.
   const loadFile = useCallback(async (file: File) => {
     setError(null);
     setResult(null);
+    clearCloudJob();
+    setCloudTemporalOptIn(false);
+    setCloudUploadConsent(false);
+    setCloudTemporalOutputFormat("apng");
+    setModelOverrideId("auto");
+    if (window.location.hash.includes("cloud-job=")) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     setResultUrl(null);
-    const format = formatFromFile(file);
-    if (!format) {
-      setError(`Unsupported file type: ${file.type || file.name}`);
+    const loaded = await loadSourceImage(file);
+    if (!loaded.ok) {
+      setError(loaded.error);
       setStatus("error");
       return;
     }
-    const buffer = await file.arrayBuffer();
-    // Animated-image detection (issue #16): a cheap header scan — no decode —
-    // that decides routing. The result drives the run path (processImage vs
-    // processAnimated) and the UI notices (frame count, "treated as a still in
-    // v2" for animated WebP/APNG). Runs for every format; non-GIFs return a
-    // still-shaped scan immediately so the cost is just the magic-byte check.
-    const animation = detectAnimation(buffer, format);
-    if (format === "heic") {
-      // Browser can't render HEIC — defer dimensions to the worker decode.
-      setSource({ file, buffer, format, url: "", width: 0, height: 0, animation });
-      setStatus("idle");
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    const dims = await readDimensions(url);
-    setSource({ file, buffer, format, url, width: dims.width, height: dims.height, animation });
+    setSource(loaded.source);
     setStatus("idle");
-  }, [resultUrl]);
+  }, [resultUrl, clearCloudJob]);
 
   const onPick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -225,12 +208,41 @@ function App() {
     setStatus("processing");
     setError(null);
     setResult(null);
+    clearCloudJob();
     setModelProgress(null);
     setDecodeProgress(null);
     setFrameProgress(null);
     try {
       // Read fresh bytes each run; the worker transfers (detaches) the buffer.
       const buffer = await source.file.arrayBuffer();
+      if (useCloudTemporal) {
+        if (!cloudUploadConsent) {
+          throw new Error("Confirm upload consent before starting cloud temporal enhancement.");
+        }
+        const job = await browserCloudTemporalJobClient.createJob(
+          buildCloudTemporalCreatePayload({
+            source,
+            buffer,
+            workerFormat: workerFormat as CloudTemporalSourceFormat,
+            effectiveMime,
+            target,
+            enhancementStrength,
+            outputFormat: cloudTemporalOutputFormat,
+            modelRoutingDecision,
+            contentType: modelRoutingContentType,
+          }),
+        );
+        setCloudJob(job);
+        setCloudResultDownload(null);
+        window.history.replaceState(null, "", job.recovery.url);
+        if (job.status === "failed") {
+          setStatus("error");
+          setError(job.failure?.message ?? "Cloud temporal enhancement could not start.");
+        } else {
+          setStatus(isTerminalCloudTemporalStatus(job.status) ? "done" : "processing");
+        }
+        return;
+      }
       const res = await processImageInWorker(
         {
           source: buffer,
@@ -240,48 +252,29 @@ function App() {
           // path. The detection ran on upload; here we just forward the decision.
           animated: source.animation.isAnimated,
           options: {
-            // The effective mode — the user's selection downgraded to faithful
-            // when AI is unavailable (readiness.effectiveMode). The old code
-            // relied on a snap-back `useEffect` to mutate `mode`; now the
-            // downgrade is derived and the user's selection is preserved.
-            // The orchestrator still degrades AI→faithful defensively too,
-            // so a stale effectiveMode can never crash the run (ADR-0002).
+            // effectiveMode is the user's selection downgraded when AI is unavailable.
             mode: effectiveMode,
-            // The derived resolution goal (tier / factor / custom long edge).
-            // `computeUpscaleFactor` inside the orchestrator handles all three —
-            // no orchestrator changes were needed for issue #8. For HEIC the
-            // source dims are unknown until decode (browser can't read HEIC),
-            // so the orchestrator computes the factor from the decoded pixels.
             target,
             outputFormat: effectiveOutput.format,
             lossless: effectiveOutput.lossless,
             preserveExif,
-            // Manual content-type override (issue #7): when the user picks photo or
-            // anime explicitly it wins over the classifier; "auto" leaves the call
-            // absent so the orchestrator classifies the decoded pixels.
             contentType:
               effectiveMode === "ai" && contentTypeOverride !== "auto"
                 ? contentTypeOverride
                 : undefined,
-            // Enhancement strength (ADR-0008, issue #40): only meaningful in AI
-            // mode for stills — the slider is hidden otherwise, so alpha is 1.0
-            // (pure AI) here whenever the value is irrelevant. Mapped from the
-            // 0–100% UI control to the [0,1] blend ratio the orchestrator uses.
+            modelId:
+              effectiveMode === "ai" && modelRoutingDecision.kind === "override"
+                ? modelRoutingDecision.model.id
+                : undefined,
+            // Enhancement strength (ADR-0008): only meaningful in AI mode for stills.
             alpha: effectiveMode === "ai" && !isAnimatedInput
               ? enhancementStrength / 100
               : 1,
           },
         },
         {
-          // Forward the lazy model-download progress (AI mode only) so the UI can
-          // show an honest first-use indicator for the ~65MB download (issue #6).
           onModelProgress: setModelProgress,
-          // Forward the HEIC-converting decode progress so the UI can show the
-          // one-time heic2any load is underway (issue #17, PRD story #5).
           onDecodeProgress: setDecodeProgress,
-          // Forward per-frame progress for the animated-GIF path so the UI shows
-          // the GIF advancing frame-by-frame (issue #18, PRD story #10). The
-          // still path never fires it.
           onFrameProgress: setFrameProgress,
         },
       );
@@ -301,7 +294,7 @@ function App() {
       setDecodeProgress(null);
       setFrameProgress(null);
     }
-  }, [source, workerFormat, effectiveMode, target, preserveExif, contentTypeOverride, resultUrl, effectiveOutput, effectiveMime]);
+  }, [source, useCloudTemporal, cloudUploadConsent, workerFormat, effectiveMime, target, enhancementStrength, cloudTemporalOutputFormat, modelRoutingDecision, modelRoutingContentType, contentTypeOverride, effectiveMode, effectiveOutput, preserveExif, isAnimatedInput, resultUrl, setCloudResultDownload, setCloudJob, clearCloudJob]);
 
   const downloadName = source
     ? source.file.name.replace(/\.[^.]+$/, "") + `_${label}_upscaled.${effectiveExt}`
@@ -314,11 +307,11 @@ function App() {
           <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">imageto24</h1>
           <p className="mx-auto max-w-prose text-balance text-muted-foreground">
             Upscale images to 1080p, 2K, or 4K — faithfully, with mathematically
-            lossless Lanczos interpolation. Everything runs in your browser;
-            no image bytes ever leave your device.
+            lossless Lanczos interpolation. Local processing runs in your browser;
+            cloud temporal enhancement is optional and upload-gated.
           </p>
           <p className="mx-auto inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Lock className="size-3" /> Privacy by architecture — there is no server.{" "}
+            <Lock className="size-3" /> Local-first privacy — uploads require explicit consent.{" "}
             <button
               data-testid="privacy-link-header"
               onClick={() => setPrivacyOpen(true)}
@@ -355,10 +348,8 @@ function App() {
           </label>
         )}
 
-        {/* Shared settings: mode, resolution control, content type, EXIF. These
-            drive both the single-image run and the batch queue, so they render
-            whether or not an image is loaded. A user configures once and runs
-            either flow. */}
+        {/* Shared settings: mode, resolution, content type, EXIF. Drive both
+            single-image and batch flows. */}
         <SettingsControls
           mode={mode}
           setMode={setMode}
@@ -374,6 +365,10 @@ function App() {
           source={source}
           contentTypeOverride={contentTypeOverride}
           setContentTypeOverride={setContentTypeOverride}
+          modelRoutingDecision={modelRoutingDecision}
+          modelRoutingContext={modelRoutingContext}
+          modelOverrideId={modelOverrideId}
+          setModelOverrideId={setModelOverrideId}
           preserveExif={preserveExif}
           setPreserveExif={setPreserveExif}
           aiDecision={aiDecision}
@@ -382,6 +377,7 @@ function App() {
           webpLossless={webpLossless}
           setWebpLossless={setWebpLossless}
           isAnimated={isAnimatedInput}
+          usingCloudTemporal={useCloudTemporal}
           animatedOutputIsApng={animatedOutputIsApng}
           enhancementStrength={enhancementStrength}
           setEnhancementStrength={setEnhancementStrength}
@@ -390,10 +386,7 @@ function App() {
         {source && (
           <section className="flex flex-col gap-8">
             {/* Preview + original dimensions. HEIC can't be rendered by the
-                browser — there's no native decoder — so we swap the <img> for a
-                placeholder card and state the dimensions are read on run; the
-                worker decodes via heic2any (issue #15) and the real factor is
-                computed from the decoded pixels. */}
+                browser — swap the <img> for a placeholder card. */}
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
               {source.format === "heic" ? (
                 <div
@@ -488,11 +481,18 @@ function App() {
               </div>
             </div>
 
-            {/* Boundary rule preview (issue #8, AC #4): when the chosen goal does
-                not exceed the source, the orchestrator will skip the upscale and
-                surface `noUpscale`. We tell the user *before* they run so it's
-                never a silent no-op — and disable the trigger, since clicking it
-                would only re-encode the unchanged image. */}
+            {canUseCloudTemporal && (
+              <CloudTemporalControls
+                enabled={cloudTemporalOptIn}
+                setEnabled={setCloudTemporalOptIn}
+                consent={cloudUploadConsent}
+                setConsent={setCloudUploadConsent}
+                outputFormat={cloudTemporalOutputFormat}
+                setOutputFormat={setCloudTemporalOutputFormat}
+              />
+            )}
+
+            {/* Boundary rule preview (issue #8, AC #4). */}
             {source && (
               <BoundaryNotice
                 source={source}
@@ -513,14 +513,21 @@ function App() {
                     <Loader2 className="animate-spin" /> Upscaling…
                   </>
                 ) : triggerDisabled ? (
-                  <>Target not larger than source</>
+                  cloudConsentMissing ? <>Confirm upload consent</> : <>Target not larger than source</>
+                ) : useCloudTemporal ? (
+                  <>Start cloud temporal enhancement</>
                 ) : (
                   <>Upscale to {label}</>
                 )}
               </Button>
               {status === "processing" && (
                 <>
-                  {decodeProgress?.phase === "heic-converting" ? (
+                  {useCloudTemporal ? (
+                    <p data-testid="progress" className="text-sm text-muted-foreground">
+                      Uploading the original animation to the cloud GPU service after
+                      explicit consent — this may take a moment.
+                    </p>
+                  ) : decodeProgress?.phase === "heic-converting" ? (
                     <p data-testid="heic-converting-notice" className="text-sm text-muted-foreground">
                       Converting your HEIC photo in the browser. The converter
                       loads once on first use and is cached afterwards; the
@@ -540,12 +547,12 @@ function App() {
                     </p>
                   ) : (
                     <p data-testid="progress" className="text-sm text-muted-foreground">
-                      Processing entirely in your browser — this may take a moment.
+                      Processing locally in your browser — this may take a moment.
                     </p>
                   )}
                 </>
               )}
-              {status === "error" && error && (
+              {status === "error" && error && !cloudJob && (
                 <p data-testid="error" className="text-sm text-destructive">{error}</p>
               )}
               {status === "done" && result && (
@@ -567,11 +574,19 @@ function App() {
           </section>
         )}
 
-        {/* Batch queue (issue #9). Available even without a single image loaded
-            — it has its own multi-file picker. Shares the mode / resolution goal
-            / content-type / EXIF controls above so a user configures once and
-            runs either flow. Issue #8 widens the shared `target` from a tier to
-            the full tier/factor/custom choice. */}
+        {cloudJob && (
+          <CloudJobPanel
+            job={cloudJob}
+            result={cloudResult}
+            resultUrl={cloudResultUrl}
+            error={cloudRecoveryError ?? error}
+            deletePending={cloudDeletePending}
+            onRefresh={() => void refreshCloudJob(cloudJob.recovery)}
+            onDelete={() => void deleteCloudJob()}
+          />
+        )}
+
+        {/* Batch queue (issue #9). Shares mode / resolution / content-type / EXIF. */}
         <BatchPanel
           options={{
             mode: effectiveMode,
@@ -584,10 +599,6 @@ function App() {
           }}
         />
 
-        {/* Privacy trust layer footer (issue #11): the privacy claim is
-            verifiable, so the affordances to read and confirm it are always one
-            click away. Donation is the only "support" surface — optional, never
-            gating (ADR-0005). */}
         <SiteFooter onOpenPrivacy={() => setPrivacyOpen(true)} />
       </div>
 
@@ -597,88 +608,9 @@ function App() {
 }
 
 /**
- * The site footer (issue #11): privacy/about, donation, and license links.
- *
- * Everything the privacy dialog expands on is reachable from here too, so the
- * trust surface is present on every screen regardless of what the user is doing.
- */
-function SiteFooter({ onOpenPrivacy }: { onOpenPrivacy: () => void }) {
-  return (
-    <footer className="mt-4 flex flex-col items-center gap-3 border-t border-border pt-6 text-center">
-      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm">
-        <button
-          data-testid="privacy-link-footer"
-          onClick={onOpenPrivacy}
-          className="inline-flex items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-        >
-          <ShieldCheck className="size-3.5" /> Privacy &amp; about
-        </button>
-        <a
-          data-testid="footer-donation-link"
-          href={SITE_LINKS.donation}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="inline-flex items-center gap-1 text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-        >
-          <Heart className="size-3.5" /> Donate
-        </a>
-        <a
-          href={`${SITE_LINKS.repo}/blob/main/LICENSE`}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-        >
-          MIT license
-        </a>
-        <a
-          href={`${SITE_LINKS.repo}/blob/main/THIRD_PARTY_LICENSES.md`}
-          target="_blank"
-          rel="noreferrer noopener"
-          className="text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-        >
-          Third-party licenses
-        </a>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Free &amp; open source. No accounts, no uploads, no usage limits.
-      </p>
-    </footer>
-  );
-}
-
-/** Read natural dimensions from an object URL via a temporary <img>. */
-function readDimensions(url: string): Promise<{ width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    img.onerror = () => reject(new Error("Could not read image dimensions"));
-    img.src = url;
-  });
-}
-
-/** Compact "12.3 MB" style byte formatter for the model-download indicator. */
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
-
-/**
  * The boundary notice: when the chosen goal does not exceed the source, the run
  * would be a no-op upscale. Per PRD user story #21 we tell the user rather than
- * silently doing nothing. Returns null when the goal is a real upscale (or when
- * the goal isn't yet resolvable, e.g. a blank custom field — the trigger is
- * disabled in that case too).
- *
- * Reads the already-computed `factorResult` from run readiness rather than
- * re-running `computeUpscaleFactor` (architecture review candidate #2/#4:
- * single source of truth for the factor).
+ * silently doing nothing.
  */
 function BoundaryNotice({
   source,
@@ -694,615 +626,6 @@ function BoundaryNotice({
       {source.height}px), so no upscale is needed. Pick a larger resolution tier,
       a larger upscale factor, or a larger custom long edge to upscale.
     </p>
-  );
-}
-
-interface SettingsControlsProps {
-  mode: ProcessingMode;
-  setMode: (m: ProcessingMode) => void;
-  /** Active resolution-input mode (issue #8). */
-  resMode: ResolutionInputMode;
-  setResMode: (m: ResolutionInputMode) => void;
-  /** Tier-mode value. */
-  tier: ResolutionTier;
-  setTier: (t: ResolutionTier) => void;
-  /** Explicit-factor-mode value. */
-  explicitFactor: UpscaleFactor;
-  setExplicitFactor: (f: UpscaleFactor) => void;
-  /** Custom-long-edge-mode value (raw text input). */
-  customLongEdgeText: string;
-  setCustomLongEdgeText: (s: string) => void;
-  /** The derived goal — passed down so the live preview reflects it. */
-  target: TargetSpec;
-  /** The loaded source, for the boundary-rule preview (null if none). */
-  source: SourceImage | null;
-  contentTypeOverride: "auto" | ContentType;
-  setContentTypeOverride: (ct: "auto" | ContentType) => void;
-  preserveExif: boolean;
-  setPreserveExif: (v: boolean) => void;
-  /** AI-capability decision (null while the probe is pending). */
-  aiDecision: CapabilityDecision | null;
-  /** Chosen output format (issue #10). */
-  outputFormat: OutputFormat;
-  setOutputFormat: (f: OutputFormat) => void;
-  /** WebP lossless/lossy toggle (issue #10); only meaningful for WebP. */
-  webpLossless: boolean;
-  setWebpLossless: (v: boolean) => void;
-  /** Whether the loaded source is animated (issue #29): the output format
-   *  selector becomes read-only and shows the device-determined container. */
-  isAnimated: boolean;
-  /** Whether the animated output will be APNG (WebCodecs present) vs GIF.
-   *  Mirrors the worker's codec-pair resolution so the label never disagrees
-   *  with the bytes (ADR-0007). */
-  animatedOutputIsApng: boolean;
-  /**
-   * Enhancement strength (0–100, v4 issue #40 / ADR-0008). Only meaningful in
-   * AI mode + still image; the control is hidden otherwise. Internally maps to
-   * the alpha blend ratio (strength / 100) between AI and faithful outputs.
-   */
-  enhancementStrength: number;
-  setEnhancementStrength: (v: number) => void;
-}
-
-/**
- * The shared settings block: mode, resolution control, content-type override,
- * EXIF. Rendered regardless of whether an image is loaded, because the batch
- * flow (issue #9) is independently configurable and needs the controls visible
- * without first uploading a single image.
- *
- * The resolution control (issue #8) offers three clearly-distinguished input
- * modes — a named tier, an explicit upscale factor, or a custom long-edge pixel
- * size — all of which collapse into the same `TargetSpec` the orchestrator
- * already understood. Switching modes never loses the other modes' values, so a
- * user can experiment and return.
- */
-function SettingsControls({
-  mode,
-  setMode,
-  resMode,
-  setResMode,
-  tier,
-  setTier,
-  explicitFactor,
-  setExplicitFactor,
-  customLongEdgeText,
-  setCustomLongEdgeText,
-  target,
-  source,
-  contentTypeOverride,
-  setContentTypeOverride,
-  preserveExif,
-  setPreserveExif,
-  aiDecision,
-  outputFormat,
-  setOutputFormat,
-  webpLossless,
-  setWebpLossless,
-  enhancementStrength,
-  setEnhancementStrength,
-  isAnimated,
-  animatedOutputIsApng,
-}: SettingsControlsProps) {
-  return (
-    <section className="flex flex-col gap-8">
-      {/* Mode selector — AI is gated by the device capability check (issue #5).
-          The gate now keys off the full derived `target`, so a factor/custom
-          goal that blows the memory budget disables AI in place with the same
-          honest reason + faithful fallback (issue #8, AC #5). */}
-      <div className="flex flex-col gap-2">
-        <p className="text-sm font-medium">Mode</p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <ModeCard
-            testId="mode-faithful"
-            active={mode === "faithful"}
-            icon={<ImageIcon className="size-5" />}
-            title="Faithful"
-            description="Mathematically lossless Lanczos interpolation. Zero detail invented."
-            onSelect={() => setMode("faithful")}
-          />
-          <ModeCard
-            testId="mode-ai"
-            active={mode === "ai"}
-            disabled={!aiDecision?.canRunAi}
-            reason={aiDecision?.reason ?? undefined}
-            icon={<Sparkles className="size-5" />}
-            title="AI Enhance"
-            description="Reconstructs detail for a higher-resolution result. Non-lossless — detail is generated."
-            footnote="Powered by Real-ESRGAN (BSD-3-Clause). First use downloads a ~65MB model once; it's cached for next time."
-            onSelect={() => setMode("ai")}
-          />
-        </div>
-      </div>
-
-      {/* Resolution control (issue #8): three input modes. A tab strip selects
-          the mode; the panel below renders the matching control. The modes are
-          visually distinct so the user always knows which goal they're setting. */}
-      <div className="flex flex-col gap-3" data-testid="resolution-control">
-        <div className="flex flex-col gap-1">
-          <p className="text-sm font-medium">Target resolution</p>
-          <div className="flex gap-1 rounded-lg border border-border p-1">
-            {RES_MODES.map((m) => (
-              <button
-                key={m}
-                data-testid={`res-mode-${m}`}
-                onClick={() => setResMode(m)}
-                className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                  resMode === m
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-accent"
-                }`}
-              >
-                {RES_MODE_LABEL[m]}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {resMode === "tier" && (
-          <div className="flex gap-2" data-testid="resolution-tier-panel">
-            {TIERS.map((t) => (
-              <button
-                key={t}
-                data-testid={`tier-${t}`}
-                onClick={() => setTier(t)}
-                className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
-                  tier === t
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-input hover:bg-accent"
-                }`}
-              >
-                {t}
-                <span className="block text-xs opacity-70">{TIER_LONG_EDGE[t]}px</span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {resMode === "factor" && (
-          <div className="flex flex-col gap-2" data-testid="resolution-factor-panel">
-            <div className="flex gap-2">
-              {FACTORS.map((f) => (
-                <button
-                  key={f}
-                  data-testid={`factor-${f}`}
-                  onClick={() => setExplicitFactor(f)}
-                  className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
-                    explicitFactor === f
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-input hover:bg-accent"
-                  }`}
-                >
-                  {f}×
-                </button>
-              ))}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              The integer multiple the algorithm natively operates at. Output is
-              exactly {explicitFactor}× the source — no tier alignment.
-            </p>
-          </div>
-        )}
-
-        {resMode === "custom" && (
-          <div className="flex flex-col gap-2" data-testid="resolution-custom-panel">
-            <label className="flex items-center gap-2 text-sm">
-              <span className="text-muted-foreground">Long edge</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                inputMode="numeric"
-                placeholder="e.g. 3000"
-                value={customLongEdgeText}
-                onChange={(e) => setCustomLongEdgeText(e.target.value)}
-                data-testid="custom-longedge-input"
-                className="w-40 rounded-md border border-input bg-background px-3 py-2 text-sm"
-              />
-              <span className="text-muted-foreground">px</span>
-            </label>
-            <p className="text-xs text-muted-foreground">
-              Enter the target long edge in pixels; aspect ratio is preserved. The
-              nearest supported factor runs, then a Lanczos resize lands exactly on
-              this size.
-            </p>
-          </div>
-        )}
-
-        {/* Live preview of how the goal resolves against the loaded source. Shows
-            the resolved factor and, for tier/custom, whether a residual Lanczos
-            adjustment applies — so the user understands the operation before
-            running. Surfaces the boundary rule inline (AC #4). */}
-        {source && <ResolutionPreview source={source} target={target} />}
-      </div>
-
-      {/* Content-type override — AI only (issue #7, ADR-0003). The classifier
-          picks the model automatically; this is the correction path when it's
-          wrong. Forcing anime downloads the ~18MB anime model on first use. */}
-      {mode === "ai" && (
-        <div className="flex flex-col gap-2" data-testid="content-type-control">
-          <p className="text-sm font-medium">Content type</p>
-          <div className="flex gap-2">
-            {(["auto", "photo", "anime"] as const).map((ct) => (
-              <button
-                key={ct}
-                data-testid={`content-type-${ct}`}
-                onClick={() => setContentTypeOverride(ct)}
-                className={`flex-1 rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
-                  contentTypeOverride === ct
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-input hover:bg-accent"
-                }`}
-              >
-                {ct === "auto" ? "Auto-detect" : ct === "photo" ? "Photo" : "Anime"}
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {contentTypeOverride === "auto"
-              ? "We detect this automatically. Override if the result looks wrong."
-              : contentTypeOverride === "anime"
-                ? "Uses the anime model — an extra ~18MB download on first use (cached afterwards)."
-                : "Uses the general (photo) model."}
-          </p>
-        </div>
-      )}
-
-      {/* Enhancement strength (ADR-0008, issue #40/#41): an AI-only slider that
-          controls the alpha blend between the AI reconstruction and the faithful
-          Lanczos output. At 100% (default) the run is byte-identical to v1–v3;
-          below 100% the blending upscaler (#38) composes the two outputs. The
-          control is shown only for AI mode + still images — animated inputs hide
-          it. When AI mode is selected with an animated source, an honest message
-          states why (ADR-0008: blending the AI first frame against faithful
-          subsequent frames causes visible frame-to-frame inconsistency), rather
-          than silently omitting the control. Animated AI first-frame enhancement
-          stays at α = 1 (pure AI) — see runUpscale. */}
-      {mode === "ai" && !isAnimated && (
-        <EnhancementStrengthControl
-          enhancementStrength={enhancementStrength}
-          setEnhancementStrength={setEnhancementStrength}
-        />
-      )}
-      {mode === "ai" && isAnimated && (
-        <p className="text-xs text-muted-foreground" data-testid="enhancement-strength-unavailable">
-          Enhancement strength is available for still images only. Blending the
-          AI-enhanced first frame against faithfully upscaled later frames would
-          make the first frame visibly different — so AI mode enhances the first
-          frame at full strength and the rest faithfully.
-        </p>
-      )}
-
-      {/* Output format selector (issue #10). PNG / WebP / JPEG. Faithful mode
-          enforces the lossless promise: JPEG and lossy WebP are explained as
-          lossless-only under faithful (the orchestrator coerces defensively;
-          the UI states the constraint honestly). WebP exposes a lossless toggle
-          under AI mode. */}
-      <OutputFormatControl
-        mode={mode}
-        outputFormat={outputFormat}
-        setOutputFormat={setOutputFormat}
-        webpLossless={webpLossless}
-        setWebpLossless={setWebpLossless}
-        isAnimated={isAnimated}
-        animatedOutputIsApng={animatedOutputIsApng}
-      />
-
-      {/* EXIF option */}
-      <label className="flex items-center gap-2 text-sm" data-testid="exif-control">
-        <input
-          type="checkbox"
-          checked={preserveExif}
-          onChange={(e) => setPreserveExif(e.target.checked)}
-          className="size-4 rounded border-input"
-        />
-        <span>Preserve EXIF metadata</span>
-        <span className="text-muted-foreground">
-          (uncheck to strip — applied on JPEG output)
-        </span>
-      </label>
-    </section>
-  );
-}
-
-interface EnhancementStrengthControlProps {
-  /** The user's 0–100% selection. */
-  enhancementStrength: number;
-  setEnhancementStrength: (v: number) => void;
-}
-
-/**
- * The enhancement-strength slider (v4, ADR-0008, issue #40).
- *
- * A continuous 0–100% control in AI mode for still images. It maps linearly to
- * the alpha-blend ratio the blending upscaler (#38) applies: 0% → pure faithful
- * (Lanczos), 100% → pure AI reconstruction (the default, byte-identical to
- * v1–v3). The honest end-labels state exactly that so the user is never in doubt
- * about what "0%" and "100%" mean.
- *
- * Rendered only in AI mode + still image. The caller gates both: faithful mode
- * has no AI to blend, and animated inputs hide the slider (ADR-0008: blending
- * the AI first frame against faithful subsequent frames causes visible
- * frame-to-frame inconsistency). The animated-hide messaging lands in #41; here
- * the component is simply not rendered for an animated source.
- */
-function EnhancementStrengthControl({
-  enhancementStrength,
-  setEnhancementStrength,
-}: EnhancementStrengthControlProps) {
-  return (
-    <div className="flex flex-col gap-2" data-testid="enhancement-strength-control">
-      <div className="flex items-baseline justify-between">
-        <p className="text-sm font-medium">Enhancement strength</p>
-        <span className="text-sm tabular-nums text-muted-foreground" data-testid="enhancement-strength-value">
-          {enhancementStrength}%
-        </span>
-      </div>
-      <input
-        type="range"
-        min={0}
-        max={100}
-        step={1}
-        value={enhancementStrength}
-        onChange={(e) => setEnhancementStrength(Number(e.target.value))}
-        data-testid="enhancement-strength-slider"
-        className="w-full accent-primary"
-      />
-      <div className="flex justify-between text-xs text-muted-foreground">
-        <span>0% — no AI (equals faithful)</span>
-        <span>100% — full AI</span>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Blends the AI-enhanced result with the faithful Lanczos upscale. Lower
-        values keep more of the original's natural texture.
-      </p>
-    </div>
-  );
-}
-
-/** The three resolution-input modes, in tab order. */
-const RES_MODES: readonly ResolutionInputMode[] = ["tier", "factor", "custom"];
-
-/** Short tab labels for each resolution-input mode (CONTEXT.md vocabulary). */
-const RES_MODE_LABEL: Record<ResolutionInputMode, string> = {
-  tier: "Resolution tier",
-  factor: "Upscale factor",
-  custom: "Custom long edge",
-};
-
-/**
- * A live preview of how the chosen goal resolves against the loaded source:
- * the integer factor that will run and, for tier/custom, whether a final
- * Lanczos adjustment lands the output on the exact target. Also surfaces the
- * noUpscale boundary inline (AC #4) so a below-source goal is explained here,
- * not just at the trigger.
- */
-function ResolutionPreview({
-  source,
-  target,
-}: {
-  source: SourceImage;
-  target: TargetSpec;
-}) {
-  const result = computeUpscaleFactor(
-    { width: source.width, height: source.height },
-    target,
-  );
-  if (result.noUpscale) {
-    return (
-      <p data-testid="resolution-preview" className="text-xs text-muted-foreground">
-        This target isn't larger than the source ({source.width} ×{" "}
-        {source.height}px), so no upscale will run.
-      </p>
-    );
-  }
-  const exact = result.residualAdjustment === 0;
-  return (
-    <p data-testid="resolution-preview" className="text-xs text-muted-foreground">
-      Will upscale at {result.factor}×
-      {exact
-        ? " — exact, no adjustment needed."
-        : " then Lanczos-adjust to the exact target."}
-    </p>
-  );
-}
-
-interface ModeCardProps {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  active?: boolean;
-  disabled?: boolean;
-  badge?: string;
-  /** Honest reason shown when the card is disabled (ADR-0002). */
-  reason?: string | null;
-  /** Small secondary line shown under the description (e.g. attribution). */
-  footnote?: string;
-  onSelect?: () => void;
-  testId?: string;
-}
-
-function ModeCard({ icon, title, description, active, disabled, badge, reason, footnote, onSelect, testId }: ModeCardProps) {
-  return (
-    <div
-      data-testid={testId}
-      role="option"
-      aria-selected={active}
-      aria-disabled={disabled}
-      onClick={disabled ? undefined : onSelect}
-      className={`relative flex cursor-pointer flex-col gap-1 rounded-lg border p-4 text-left ${
-        active
-          ? "border-primary ring-1 ring-primary"
-          : "border-input hover:border-primary/50"
-      } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
-    >
-      <div className="flex items-center gap-2">
-        {icon}
-        <span className="font-medium">{title}</span>
-        {active && <span className="ml-auto text-xs text-primary">Selected</span>}
-        {badge && (
-          <span className="ml-auto rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-            {badge}
-          </span>
-        )}
-      </div>
-      <p className="text-sm text-muted-foreground">{description}</p>
-      {footnote && <p className="text-xs text-muted-foreground/80">{footnote}</p>}
-      {disabled && reason && (
-        <p className="text-xs text-muted-foreground">{reason}</p>
-      )}
-    </div>
-  );
-}
-
-/** Human label + short description for each output format (issue #10). */
-const OUTPUT_FORMAT_LABEL: Record<OutputFormat, string> = {
-  png: "PNG",
-  webp: "WebP",
-  jpeg: "JPEG",
-};
-
-interface OutputFormatControlProps {
-  mode: ProcessingMode;
-  outputFormat: OutputFormat;
-  setOutputFormat: (f: OutputFormat) => void;
-  webpLossless: boolean;
-  setWebpLossless: (v: boolean) => void;
-  /**
-   * True when the loaded source is an animated image (multi-frame GIF/WebP).
-   * The animated output container is device-determined (ADR-0007, issue #29),
-   * not user-selected, so the PNG/WebP/JPEG cards are irrelevant and the control
-   * switches to a read-only label stating what will actually be emitted.
-   */
-  isAnimated: boolean;
-  /** The device-determined animated output is APNG (WebCodecs) or GIF (degrade). */
-  animatedOutputIsApng: boolean;
-}
-
-/**
- * The output format selector (issue #10): PNG / WebP / JPEG.
- *
- * Faithful mode honours the lossless promise, so JPEG (lossy by nature) and a
- * lossy WebP are not valid faithful outputs. Rather than hiding them, the cards
- * stay visible but are disabled with an honest reason — the user understands
- * *why* their choice is constrained rather than wondering where it went. PNG and
- * (under AI) WebP's lossless/lossy toggle remain fully usable.
- *
- * HEIC input is now accepted (issue #15): HEIC files are converted to PNG in
- * the browser via heic2any on first use, so iPhone users no longer need to
- * convert first. Output is never HEIC (no viable browser-side encoder; users want
- * PNG/JPEG/WebP anyway) — the notice below states this so the user understands
- * why their HEIC comes back as another format.
- */
-function OutputFormatControl({
-  mode,
-  outputFormat,
-  setOutputFormat,
-  webpLossless,
-  setWebpLossless,
-  isAnimated,
-  animatedOutputIsApng,
-}: OutputFormatControlProps) {
-  const faithful = mode === "faithful";
-  // Animated input (issue #29 / ADR-0007): the output format is device-determined
-  // (APNG on WebCodecs, GIF otherwise) and is NOT one of PNG/WebP/JPEG, so the
-  // usual selector is meaningless. Render a read-only notice of the actual format
-  // + the reason instead of disabling the three cards (which would imply the
-  // user's PNG/WebP/JPEG pick *almost* applied). The animation-preserved notice
-  // in the source panel carries the ADR-0006 messaging; this panel states the
-  // format decision in isolation so it sits beside the still-path controls.
-  if (isAnimated) {
-    return (
-      <div className="flex flex-col gap-2" data-testid="output-format-control">
-        <p className="text-sm font-medium">Output format</p>
-        <p className="text-sm text-muted-foreground" data-testid="animated-output-label">
-          {animatedOutputIsApng
-            ? "APNG (true colour)"
-            : "GIF (256 colours — your browser lacks WebCodecs)"}
-        </p>
-        <p className="text-xs text-muted-foreground" data-testid="output-format-hint">
-          {animatedOutputIsApng
-            ? "Animated output is a true-colour APNG on this browser (WebCodecs available) — your format choice doesn't apply."
-            : "Your browser lacks WebCodecs, so animated output is a 256-colour GIF (an honest degrade; fine detail may band). Your format choice doesn't apply."}
-        </p>
-        <p className="text-xs text-muted-foreground" data-testid="heic-notice">
-          HEIC/HEIF (Apple photos) is accepted on upload and converted in your
-          browser — output is always PNG, WebP, or JPEG, never HEIC.
-        </p>
-      </div>
-    );
-  }
-  return (
-    <div className="flex flex-col gap-2" data-testid="output-format-control">
-      <p className="text-sm font-medium">Output format</p>
-      <div className="flex gap-2">
-        {OUTPUT_FORMATS.map((f) => {
-          // Faithful mode disables lossy choices honestly rather than hiding
-          // them: JPEG is always lossy, so it's never a valid faithful output;
-          // WebP is permitted but only as lossless.
-          const disabled = faithful && f === "jpeg";
-          const reason = disabled
-            ? "Faithful mode is lossless — JPEG can't be. Pick PNG or lossless WebP."
-            : undefined;
-          const selected = outputFormat === f;
-          return (
-            <button
-              key={f}
-              data-testid={`output-format-${f}`}
-              onClick={() => !disabled && setOutputFormat(f)}
-              disabled={disabled}
-              aria-pressed={selected}
-              title={reason}
-              className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
-                selected
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : disabled
-                    ? "border-input text-muted-foreground/50 cursor-not-allowed"
-                    : "border-input hover:bg-accent"
-              }`}
-            >
-              {OUTPUT_FORMAT_LABEL[f]}
-            </button>
-          );
-        })}
-      </div>
-      {/* WebP lossless toggle — only meaningful under WebP. Under faithful it is
-          forced on (the lossless promise); show it locked to make the contract
-          legible rather than silently overriding. */}
-      {outputFormat === "webp" && (
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            data-testid="webp-lossless-toggle"
-            checked={faithful ? true : webpLossless}
-            disabled={faithful}
-            onChange={(e) => setWebpLossless(e.target.checked)}
-            className="size-4 rounded border-input"
-          />
-          <span>
-            {faithful
-              ? "Lossless (required by faithful mode)"
-              : webpLossless
-                ? "Lossless WebP"
-                : "Lossy WebP (smaller file)"}
-          </span>
-        </label>
-      )}
-      <p className="text-xs text-muted-foreground" data-testid="output-format-hint">
-        {faithful
-          ? outputFormat === "jpeg"
-            ? "Faithful mode is lossless, so your JPEG choice will be saved as lossless WebP instead."
-            : "Faithful output is always lossless — PNG or lossless WebP."
-          : "AI mode supports all three formats."}
-      </p>
-      {/* HEIC is accepted as input (issue #15) but is never an output: there
-          is no viable browser-side HEIC encoder, and users want PNG/JPEG/WebP
-          anyway. Stated so iOS users understand why their HEIC returns as
-          another format. */}
-      <p className="text-xs text-muted-foreground" data-testid="heic-notice">
-        HEIC/HEIF (Apple photos) is accepted on upload and converted in your
-        browser — output is always PNG, WebP, or JPEG, never HEIC.
-      </p>
-    </div>
   );
 }
 
