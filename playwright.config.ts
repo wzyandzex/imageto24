@@ -18,7 +18,9 @@ export default defineConfig({
   expect: { timeout: 30_000 },
   reporter: process.env.CI ? [["github"], ["list"]] : "list",
   use: {
-    baseURL: "http://localhost:4173",
+    // Dedicated preview port so local e2e never reuses an unrelated server that
+    // happens to already listen on the default Vite preview port (4173).
+    baseURL: "http://localhost:4174",
     trace: "on-first-retry",
   },
   projects: [
@@ -34,9 +36,12 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npm run build && npm run preview -- --port 4173",
-    url: "http://localhost:4173",
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    command: "npm run build && npm run preview -- --port 4174 --strictPort",
+    url: "http://localhost:4174",
+    // Only reuse when CI is not set *and* the existing server is ours. Prefer a
+    // fresh preview in local runs so a different app on this port cannot poison
+    // the suite (Playwright only checks that the port answers, not the app).
+    reuseExistingServer: false,
+    timeout: 180_000,
   },
 });
