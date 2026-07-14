@@ -1,15 +1,15 @@
 /**
- * Node-side default deps for the cloud temporal GPU service MVP.
+ * Node-side default deps for the local / free cloud temporal host.
  *
- * This is intentionally a wiring module, not a production temporal-model runtime:
- * it decodes the original animated upload, upscales every frame with faithful
- * Lanczos (all-frames, no sampling), and re-encodes APNG/GIF. Real temporal model
- * weights can replace {@link createNodeCloudTemporalEnhancer} without changing the
- * HTTP or service contracts.
+ * Default enhancer is **temporal-consistency** (zero-cost 2a): faithful Lanczos
+ * on every frame + neighbour blend for flicker reduction. This is not a neural
+ * temporal model. Set `CLOUD_TEMPORAL_ENHANCER=lanczos` for pure per-frame
+ * Lanczos, or inject a real GPU enhancer later without changing HTTP contracts.
  */
 import { decodeApngFrames } from "../src/pipeline/browser/apngParser";
 import { decodeGifSequence } from "../src/pipeline/decodeGifSequence";
 import { encodeGifSequence } from "../src/pipeline/encodeGifSequence";
+import { enhanceWithTemporalConsistency } from "../src/pipeline/temporalConsistency";
 import { lanczosUpscale } from "../src/pipeline/lanczos";
 import { computeUpscaleFactor } from "../src/pipeline/computeUpscaleFactor";
 import type {
@@ -22,12 +22,28 @@ import type {
 import type { CloudTemporalSourceFormat } from "../src/pipeline/cloudTemporalJob";
 import type { ImageData } from "../src/pipeline/types";
 
-export function createNodeCloudTemporalDeps(): CloudTemporalGpuServiceDeps {
+/** Which free local enhancer the host wires by default. */
+export type CloudTemporalEnhancerKind = "temporal-consistency" | "lanczos";
+
+export function createNodeCloudTemporalDeps(
+  kind: CloudTemporalEnhancerKind = resolveEnhancerKindFromEnv(),
+): CloudTemporalGpuServiceDeps {
   return {
     decoder: createNodeCloudTemporalDecoder(),
-    enhancer: createNodeCloudTemporalEnhancer(),
+    enhancer:
+      kind === "lanczos"
+        ? createNodeCloudTemporalEnhancer()
+        : createNodeTemporalConsistencyEnhancer(),
     encoder: createNodeCloudTemporalEncoder(),
   };
+}
+
+export function resolveEnhancerKindFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): CloudTemporalEnhancerKind {
+  const raw = (env.CLOUD_TEMPORAL_ENHANCER ?? "temporal-consistency").trim().toLowerCase();
+  if (raw === "lanczos" || raw === "faithful") return "lanczos";
+  return "temporal-consistency";
 }
 
 export function createNodeCloudTemporalDecoder(): CloudTemporalSequenceDecoder {
@@ -48,6 +64,7 @@ export function createNodeCloudTemporalDecoder(): CloudTemporalSequenceDecoder {
   };
 }
 
+/** Pure per-frame Lanczos (no neighbour mix). Useful for A/B vs temporal-consistency. */
 export function createNodeCloudTemporalEnhancer(): CloudTemporalEnhancer {
   return {
     async enhanceTemporalSequence(frames, options) {
@@ -66,6 +83,21 @@ export function createNodeCloudTemporalEnhancer(): CloudTemporalEnhancer {
         ...frame,
         imageData: lanczosUpscale(frame.imageData, factor),
       }));
+    },
+  };
+}
+
+/**
+ * Free local "temporal" path: all-frames Lanczos + neighbour consistency blend.
+ * Strength from the UI controls how hard neighbours mix (see temporalConsistency.ts).
+ */
+export function createNodeTemporalConsistencyEnhancer(): CloudTemporalEnhancer {
+  return {
+    async enhanceTemporalSequence(frames, options) {
+      return enhanceWithTemporalConsistency(frames, {
+        target: options.target,
+        enhancementStrength: options.enhancementStrength,
+      });
     },
   };
 }
