@@ -168,12 +168,16 @@ export {
   type CloudTemporalSourceFormat,
   type CloudTemporalSourceMetadata,
   type FakeCloudTemporalJobClientOptions,
+  CLOUD_TEMPORAL_ACCEPTED_SOURCE_FORMATS,
   CLOUD_TEMPORAL_JOB_STATUSES,
   DEFAULT_CLOUD_TEMPORAL_LIMITS,
   FakeCloudTemporalJobClient,
   cloudTemporalOutputMime,
+  cloudTemporalTimeoutFailure,
   createFakeCloudTemporalJobClient,
   isTerminalCloudTemporalStatus,
+  resolveCloudTemporalCreateLimitFailure,
+  type CloudTemporalCreateLimitContext,
 } from "./cloudTemporalJob";
 
 // GPU service MVP core (v5 issue #64): environment-agnostic implementation of

@@ -7,16 +7,16 @@ import { CloudTemporalControls } from "@/components/CloudTemporalControls";
 import { PrivacyDialog } from "@/components/PrivacyDialog";
 import { SettingsControls } from "@/components/SettingsControls";
 import { SiteFooter } from "@/components/SiteFooter";
-import { ACCEPTED_INPUT, formatFromFile } from "@/lib/imageFormat";
+import { ACCEPTED_INPUT } from "@/lib/imageFormat";
 import { formatBytes } from "@/lib/formatBytes";
-import { readDimensions } from "@/lib/readDimensions";
+import { loadSourceImage } from "@/lib/loadSourceImage";
+import { buildCloudTemporalCreatePayload } from "@/lib/buildCloudTemporalPayload";
 import { processImageInWorker } from "@/pipeline/browser/runInWorker";
 import { browserCloudTemporalJobClient } from "@/pipeline/browser/cloudTemporalClient";
 import type { DecodeProgress } from "@/pipeline/browser/runInWorker";
 import { useRunReadiness } from "@/pipeline/useRunReadiness";
 import { useCloudJob } from "@/hooks/useCloudJob";
 import {
-  detectAnimation,
   isTerminalCloudTemporalStatus,
   resolveModelRouting,
 } from "@/pipeline";
@@ -161,7 +161,7 @@ function App() {
     };
   }, [resultUrl]);
 
-  // Load a chosen file: read bytes, probe dimensions via an Image, stash state.
+  // Load a chosen file via the shared loader (bytes + animation scan + dims).
   // HEIC skips the dimension probe (browser has no native decoder) and stashes
   // 0×0; the orchestrator computes the real factor from decoded pixels.
   const loadFile = useCallback(async (file: File) => {
@@ -177,23 +177,13 @@ function App() {
     }
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     setResultUrl(null);
-    const format = formatFromFile(file);
-    if (!format) {
-      setError(`Unsupported file type: ${file.type || file.name}`);
+    const loaded = await loadSourceImage(file);
+    if (!loaded.ok) {
+      setError(loaded.error);
       setStatus("error");
       return;
     }
-    const buffer = await file.arrayBuffer();
-    // Animated-image detection (issue #16): cheap header scan, no decode.
-    const animation = detectAnimation(buffer, format);
-    if (format === "heic") {
-      setSource({ file, buffer, format, url: "", width: 0, height: 0, animation });
-      setStatus("idle");
-      return;
-    }
-    const url = URL.createObjectURL(file);
-    const dims = await readDimensions(url);
-    setSource({ file, buffer, format, url, width: dims.width, height: dims.height, animation });
+    setSource(loaded.source);
     setStatus("idle");
   }, [resultUrl, clearCloudJob]);
 
@@ -226,35 +216,19 @@ function App() {
         if (!cloudUploadConsent) {
           throw new Error("Confirm upload consent before starting cloud temporal enhancement.");
         }
-        const job = await browserCloudTemporalJobClient.createJob({
-          source: {
+        const job = await browserCloudTemporalJobClient.createJob(
+          buildCloudTemporalCreatePayload({
+            source,
             buffer,
-            metadata: {
-              fileName: source.file.name,
-              mimeType: source.file.type || effectiveMime,
-              format: workerFormat as CloudTemporalSourceFormat,
-              byteSize: source.file.size || buffer.byteLength,
-              width: source.width,
-              height: source.height,
-              frameCount: source.animation.frameCount,
-              hasAlpha: source.format === "png" || source.format === "webp" || source.format === "gif",
-            },
-          },
-          target,
-          enhancementStrength,
-          outputFormat: cloudTemporalOutputFormat,
-          modelRouting: modelRoutingDecision.kind === "override"
-            ? {
-                kind: "override",
-                modelId: modelRoutingDecision.model.id,
-                contentType: modelRoutingContentType,
-              }
-            : {
-                kind: "auto",
-                modelId: modelRoutingDecision.model.id,
-                contentType: modelRoutingContentType,
-              },
-        });
+            workerFormat: workerFormat as CloudTemporalSourceFormat,
+            effectiveMime,
+            target,
+            enhancementStrength,
+            outputFormat: cloudTemporalOutputFormat,
+            modelRoutingDecision,
+            contentType: modelRoutingContentType,
+          }),
+        );
         setCloudJob(job);
         setCloudResultDownload(null);
         window.history.replaceState(null, "", job.recovery.url);
@@ -315,7 +289,7 @@ function App() {
       setDecodeProgress(null);
       setFrameProgress(null);
     }
-  }, [source, useCloudTemporal, cloudUploadConsent, workerFormat, effectiveMime, target, enhancementStrength, cloudTemporalOutputFormat, modelRoutingDecision.kind, modelRoutingDecision.model.id, modelRoutingContentType, contentTypeOverride, effectiveMode, effectiveOutput, preserveExif, isAnimatedInput, resultUrl, setCloudResultDownload, setCloudJob, clearCloudJob]);
+  }, [source, useCloudTemporal, cloudUploadConsent, workerFormat, effectiveMime, target, enhancementStrength, cloudTemporalOutputFormat, modelRoutingDecision, modelRoutingContentType, contentTypeOverride, effectiveMode, effectiveOutput, preserveExif, isAnimatedInput, resultUrl, setCloudResultDownload, setCloudJob, clearCloudJob]);
 
   const downloadName = source
     ? source.file.name.replace(/\.[^.]+$/, "") + `_${label}_upscaled.${effectiveExt}`

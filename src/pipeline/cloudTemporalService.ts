@@ -1,7 +1,10 @@
 import {
   cloudTemporalOutputMime,
+  cloudTemporalTimeoutFailure,
+  CLOUD_TEMPORAL_ACCEPTED_SOURCE_FORMATS,
   DEFAULT_CLOUD_TEMPORAL_LIMITS,
   isTerminalCloudTemporalStatus,
+  resolveCloudTemporalCreateLimitFailure,
   type CloudTemporalCreateJobPayload,
   type CloudTemporalJob,
   type CloudTemporalJobClient,
@@ -90,8 +93,6 @@ interface StoredGpuJob {
   result?: CloudTemporalJobResult;
   processing?: Promise<void>;
 }
-
-const ACCEPTED_SOURCE_FORMATS: ReadonlySet<CloudTemporalSourceFormat> = new Set(["gif", "webp", "apng"]);
 
 /** Create an in-process implementation of the independent cloud temporal GPU service contract. */
 export function createCloudTemporalGpuService(
@@ -304,29 +305,12 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
   private resolveCreateFailure(
     payload: CloudTemporalCreateJobPayload,
   ): CloudTemporalProductLimitFailure | undefined {
-    if (!ACCEPTED_SOURCE_FORMATS.has(payload.source.metadata.format)) {
-      return productLimitFailure("unsupported-input", "Cloud temporal enhancement accepts animated GIF, WebP, or APNG files only.");
-    }
-    if (payload.source.metadata.frameCount <= 1) {
-      return productLimitFailure("unsupported-input", "Cloud temporal enhancement requires an animated source with more than one frame.");
-    }
-    if (payload.source.metadata.byteSize > this.limits.maxFileBytes) {
-      return productLimitFailure("file-too-large", "The animated source file exceeds the cloud upload limit.");
-    }
-    if (payload.source.metadata.frameCount > this.limits.maxFrames) {
-      return productLimitFailure("too-many-frames", "The animation has too many frames for cloud temporal enhancement.");
-    }
-    const totalPixels = payload.source.metadata.width * payload.source.metadata.height * payload.source.metadata.frameCount;
-    if (totalPixels > this.limits.maxTotalPixels) {
-      return productLimitFailure("too-many-pixels", "The animation exceeds the total pixel limit for cloud temporal enhancement.");
-    }
-    if ((payload.retryCount ?? 0) > this.limits.maxRetryCount) {
-      return productLimitFailure("retry-limit", "The cloud retry limit has been reached for this animation.");
-    }
-    if (this.activeJobCount() >= this.limits.maxQueuedJobs) {
-      return productLimitFailure("queue-saturated", "The cloud temporal enhancement queue is currently full.");
-    }
-    return undefined;
+    return resolveCloudTemporalCreateLimitFailure(payload, {
+      limits: this.limits,
+      activeJobCount: this.activeJobCount(),
+      enforceAnimatedSource: true,
+      acceptedFormats: CLOUD_TEMPORAL_ACCEPTED_SOURCE_FORMATS,
+    });
   }
 
   private activeJobCount(): number {
@@ -360,7 +344,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
       ...stored.job,
       status: "failed",
       updatedAt: currentTime,
-      failure: productLimitFailure("timeout", "The cloud temporal enhancement job exceeded its time limit."),
+      failure: cloudTemporalTimeoutFailure(),
       result: undefined,
     };
   }
@@ -515,13 +499,6 @@ function resolveEncodeOptions(
     return { ...dimensions, compatibilityTradeoff: "gif-256-colour-one-bit-alpha" };
   }
   return dimensions;
-}
-
-function productLimitFailure(
-  reason: CloudTemporalProductLimitFailure["reason"],
-  message: string,
-): CloudTemporalProductLimitFailure {
-  return { kind: "product-limit", reason, message };
 }
 
 function processingFailure(err: unknown): CloudTemporalProcessingFailure {
