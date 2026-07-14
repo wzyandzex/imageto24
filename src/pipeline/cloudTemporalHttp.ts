@@ -1,17 +1,32 @@
-import type {
-  CloudTemporalCreateJobPayload,
-  CloudTemporalJobClient,
-  CloudTemporalJobResult,
-  CloudTemporalOutputFormat,
-  CloudTemporalRecoveryIdentity,
-  CloudTemporalSourceMetadata,
+import {
+  DEFAULT_CLOUD_TEMPORAL_LIMITS,
+  type CloudTemporalCreateJobPayload,
+  type CloudTemporalJobClient,
+  type CloudTemporalJobResult,
+  type CloudTemporalOutputFormat,
+  type CloudTemporalRecoveryIdentity,
+  type CloudTemporalSourceMetadata,
 } from "./cloudTemporalJob";
 import type { TargetSpec } from "./types";
 
+/** Default create-body ceiling: product max file size + headroom for form fields. */
+export const DEFAULT_CLOUD_TEMPORAL_MAX_BODY_BYTES =
+  DEFAULT_CLOUD_TEMPORAL_LIMITS.maxFileBytes + 1024 * 1024;
+
 export interface CloudTemporalHttpOptions {
   readonly service: CloudTemporalJobClient;
-  /** Allowed browser origins for CORS. Defaults to reflecting the request Origin. */
+  /**
+   * Allowed browser origins for CORS.
+   * - omit / undefined: reflect the request Origin when present (dev-friendly)
+   * - string: fixed allow-list value (use exact origin, never `"*"` with credentials)
+   * - function: return the origin to echo, or null to omit CORS headers
+   */
   readonly allowOrigin?: string | ((origin: string | null) => string | null);
+  /**
+   * Hard ceiling on POST /jobs Content-Length / body size before multipart parse.
+   * Defaults to {@link DEFAULT_CLOUD_TEMPORAL_MAX_BODY_BYTES}.
+   */
+  readonly maxBodyBytes?: number;
 }
 
 /**
@@ -48,7 +63,9 @@ export async function handleCloudTemporalHttpRequest(
     }
 
     if (request.method === "POST" && path === "/jobs") {
-      const payload = await parseCreatePayload(request);
+      const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_CLOUD_TEMPORAL_MAX_BODY_BYTES;
+      assertBodyWithinLimit(request, maxBodyBytes);
+      const payload = await parseCreatePayload(request, maxBodyBytes);
       const job = await options.service.createJob(payload);
       return jsonResponse(job, 200, corsOrigin);
     }
@@ -76,16 +93,24 @@ export async function handleCloudTemporalHttpRequest(
     return textResponse("Not found.", 404, corsOrigin);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const status = /invalid|not found|not ready|no ready result/i.test(message) ? 400 : 500;
+    const status = statusForHttpError(message);
     return textResponse(message, status, corsOrigin);
   }
 }
 
-async function parseCreatePayload(request: Request): Promise<CloudTemporalCreateJobPayload> {
+async function parseCreatePayload(
+  request: Request,
+  maxBodyBytes: number,
+): Promise<CloudTemporalCreateJobPayload> {
   const form = await request.formData();
   const sourceEntry = form.get("source");
   if (!(sourceEntry instanceof Blob)) {
     throw new Error("Cloud temporal create requires a source file field.");
+  }
+  if (sourceEntry.size > maxBodyBytes) {
+    throw new Error(
+      `Cloud temporal upload exceeds the maximum body size of ${maxBodyBytes} bytes.`,
+    );
   }
   const metadataRaw = form.get("metadata");
   const targetRaw = form.get("target");
@@ -113,6 +138,11 @@ async function parseCreatePayload(request: Request): Promise<CloudTemporalCreate
   }
 
   const buffer = await sourceEntry.arrayBuffer();
+  if (buffer.byteLength > maxBodyBytes) {
+    throw new Error(
+      `Cloud temporal upload exceeds the maximum body size of ${maxBodyBytes} bytes.`,
+    );
+  }
   return {
     source: {
       buffer,
@@ -131,6 +161,33 @@ async function parseCreatePayload(request: Request): Promise<CloudTemporalCreate
       ? Number(retryCountRaw)
       : undefined,
   };
+}
+
+/**
+ * Reject oversized create bodies early using Content-Length when the client
+ * supplies it. Multipart overhead means Content-Length can exceed the source
+ * alone; the ceiling is intentionally the full body budget.
+ */
+function assertBodyWithinLimit(request: Request, maxBodyBytes: number): void {
+  const header = request.headers.get("content-length");
+  if (!header) return;
+  const length = Number(header);
+  if (!Number.isFinite(length) || length < 0) {
+    throw new Error("Invalid Content-Length header.");
+  }
+  if (length > maxBodyBytes) {
+    throw new Error(
+      `Cloud temporal upload exceeds the maximum body size of ${maxBodyBytes} bytes.`,
+    );
+  }
+}
+
+function statusForHttpError(message: string): number {
+  if (/exceeds the maximum body size/i.test(message)) return 413;
+  if (/invalid|not found|not ready|no ready result|missing required|must be/i.test(message)) {
+    return 400;
+  }
+  return 500;
 }
 
 function recoveryFromRequest(jobId: string, url: URL): CloudTemporalRecoveryIdentity {
@@ -176,8 +233,12 @@ function corsResponse(status: number, corsOrigin: string | null): Response {
 
 function applyCors(headers: Headers, corsOrigin: string | null): void {
   if (!corsOrigin) return;
+  // Browsers reject `Access-Control-Allow-Origin: *` together with credentials.
+  // Never pair a wildcard with allow-credentials.
   headers.set("access-control-allow-origin", corsOrigin);
-  headers.set("access-control-allow-credentials", "true");
+  if (corsOrigin !== "*") {
+    headers.set("access-control-allow-credentials", "true");
+  }
   headers.set("vary", "Origin");
 }
 
@@ -186,6 +247,15 @@ function resolveCorsOrigin(
   allowOrigin?: string | ((origin: string | null) => string | null),
 ): string | null {
   if (typeof allowOrigin === "function") return allowOrigin(requestOrigin);
-  if (typeof allowOrigin === "string") return allowOrigin;
+  if (typeof allowOrigin === "string") {
+    // Fixed allow-list: only echo when it matches the request, or when the
+    // host intentionally set a non-wildcard fixed origin (local tools).
+    if (allowOrigin === "*") return "*";
+    if (requestOrigin && requestOrigin === allowOrigin) return allowOrigin;
+    if (!requestOrigin) return allowOrigin;
+    return null;
+  }
+  // Default: reflect a concrete Origin when present; omit CORS when absent
+  // (same-origin / non-browser clients). Never invent `"*"` with credentials.
   return requestOrigin;
 }

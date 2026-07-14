@@ -196,17 +196,13 @@ async function decodeGifSequence(buffer: ArrayBuffer): Promise<CloudTemporalFram
 }
 
 async function decodeApngSequence(buffer: ArrayBuffer): Promise<CloudTemporalFrame[]> {
-  const [{ Buffer }, mod] = await Promise.all([
+  const [{ Buffer }, { PNG }] = await Promise.all([
     import("buffer"),
-    import("pngjs/browser") as Promise<{
-      PNG: {
-        sync: { read: (buffer: { length: number } | Uint8Array) => { width: number; height: number; data: Uint8Array } };
-      };
-    }>,
+    import("pngjs/browser"),
   ]);
   const frames = await decodeApngFrames(buffer, async (pngBuffer) => {
     const bytes = new Uint8Array(pngBuffer);
-    const png = mod.PNG.sync.read(Buffer.from(bytes));
+    const png = PNG.sync.read(Buffer.from(bytes));
     return {
       width: png.width,
       height: png.height,

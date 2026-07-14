@@ -502,6 +502,81 @@ describe("CloudTemporalGpuService — transparency-preserving temporal enhanceme
     await expect(service.getResult(created.recovery)).rejects.toThrow(/not ready/i);
     expect(deps.encoder.encodeApng).not.toHaveBeenCalled();
   });
+
+  it("purges terminal job rows after the grace window so the host map stays bounded", async () => {
+    let now = 1_000;
+    const deps = makeDeps();
+    const service = createCloudTemporalGpuService({
+      deps,
+      now: () => now,
+      limits: { retentionWindowMs: 60_000 },
+      purgeGraceMs: 1_000,
+    });
+
+    const created = await service.createJob(payload());
+    await service.getResult(created.recovery);
+    expect(service.retainedJobCount()).toBe(1);
+
+    // Still within retention: ready job remains recoverable.
+    now = 1_000 + 30_000;
+    expect((await service.getJob(created.recovery)).status).toBe("ready");
+    expect(service.retainedJobCount()).toBe(1);
+
+    // Past retention: bytes expire, row stays for the grace window.
+    now = 1_000 + 60_000 + 1;
+    expect((await service.getJob(created.recovery)).status).toBe("expired");
+    expect(service.retainedJobCount()).toBe(1);
+
+    // Past purge grace: row is dropped entirely; recovery identity is invalid.
+    now = 1_000 + 60_000 + 1 + 1_000 + 1;
+    expect(service.retainedJobCount()).toBe(0);
+    await expect(service.getJob(created.recovery)).rejects.toThrow(/invalid/i);
+  });
+
+  it("purges deleted jobs after the grace window", async () => {
+    let now = 5_000;
+    const service = createCloudTemporalGpuService({
+      deps: makeDeps(),
+      now: () => now,
+      purgeGraceMs: 500,
+    });
+
+    const created = await service.createJob(payload());
+    // Wait for processing so delete races a ready job, not an in-flight one.
+    await service.getResult(created.recovery);
+    const deleted = await service.deleteJob(created.recovery);
+    expect(deleted.status).toBe("deleted");
+    expect(service.retainedJobCount()).toBe(1);
+
+    now = 5_000 + 500 + 1;
+    expect(service.retainedJobCount()).toBe(0);
+    await expect(service.getJob(created.recovery)).rejects.toThrow(/invalid/i);
+  });
+
+  it("does not resurrect a job deleted while processing is still in flight", async () => {
+    let releaseDecode!: (frames: CloudTemporalFrame[]) => void;
+    const frames = [frame(1), frame(2), frame(3)];
+    const deps = makeDeps(frames);
+    deps.decoder.decodeTemporalSequence = vi.fn(
+      () => new Promise<CloudTemporalFrame[]>((resolve) => {
+        releaseDecode = resolve;
+      }),
+    );
+    const service = createCloudTemporalGpuService({ deps, now: () => 9_000 });
+
+    const created = await service.createJob(payload());
+    const deleted = await service.deleteJob(created.recovery);
+    expect(deleted.status).toBe("deleted");
+
+    releaseDecode(frames);
+    // getJob awaits any in-flight processJob; after it settles the status must
+    // still be deleted (not overwritten to ready/failed).
+    const stillDeleted = await service.getJob(created.recovery);
+    expect(stillDeleted.status).toBe("deleted");
+    expect(stillDeleted.result).toBeUndefined();
+    await expect(service.getResult(created.recovery)).rejects.toThrow(/not ready/i);
+    expect(deps.encoder.encodeApng).not.toHaveBeenCalled();
+  });
 });
 
 function alphaValues(data: Uint8ClampedArray): number[] {

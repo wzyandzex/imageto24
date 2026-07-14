@@ -22,5 +22,15 @@
 
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "vitest.config.ts"]
+  "include": [
+    "vite.config.ts",
+    "vitest.config.ts",
+    "scripts/cloud-temporal-server.ts",
+    "scripts/cloud-temporal-deps.ts",
+    "src/upng-js.d.ts",
+    "src/gifenc.d.ts",
+    "src/pngjs.d.ts"
+  ]
 }
+
+

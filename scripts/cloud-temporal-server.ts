@@ -28,12 +28,17 @@ const service = createCloudTemporalGpuService({
     `${publicBase}/jobs/${encodeURIComponent(jobId)}?token=${encodeURIComponent(token)}`,
 });
 
+// Local/dev CORS: reflect the browser Origin when present so credentialed
+// fetches from Vite work. Never fall back to `"*"` with credentials (invalid
+// per the Fetch CORS rules and previously misconfigured here).
+const allowOrigin = (origin: string | null): string | null => origin;
+
 const server = createServer(async (req, res) => {
   try {
     const request = await nodeRequestToFetch(req, publicBase);
     const response = await handleCloudTemporalHttpRequest(request, {
       service,
-      allowOrigin: (origin) => origin ?? "*",
+      allowOrigin,
     });
     await writeFetchResponse(res, response);
   } catch (err) {

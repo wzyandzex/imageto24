@@ -74,6 +74,13 @@ export interface CloudTemporalGpuServiceOptions {
   readonly now?: () => number;
   readonly limits?: Partial<CloudTemporalProductLimits>;
   readonly recoveryUrl?: (recovery: { jobId: string; token: string }) => string;
+  /**
+   * How long after terminal status (expired/deleted/failed, or ready past
+   * retention) the job row itself may remain in the in-memory map. Defaults to
+   * the retention window. Proactive purge drops map entries so a long-lived
+   * host does not accumulate unbounded job metadata after bytes are cleared.
+   */
+  readonly purgeGraceMs?: number;
 }
 
 interface StoredGpuJob {
@@ -108,6 +115,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
   private readonly now: () => number;
   private readonly limits: CloudTemporalProductLimits;
   private readonly recoveryUrl: (recovery: { jobId: string; token: string }) => string;
+  private readonly purgeGraceMs: number;
   private readonly jobs = new Map<string, StoredGpuJob>();
   private nextJobNumber = 1;
 
@@ -115,11 +123,13 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
     this.deps = options.deps;
     this.now = options.now ?? (() => Date.now());
     this.limits = { ...DEFAULT_CLOUD_TEMPORAL_LIMITS, ...options.limits };
+    this.purgeGraceMs = options.purgeGraceMs ?? this.limits.retentionWindowMs;
     this.recoveryUrl = options.recoveryUrl ??
       ((recovery) => `#cloud-job=${recovery.jobId}&token=${recovery.token}`);
   }
 
   async createJob(payload: CloudTemporalCreateJobPayload): Promise<CloudTemporalJob> {
+    this.purgeStaleJobs();
     const createdAt = this.now();
     const jobId = `cloud-gpu-job-${this.nextJobNumber}`;
     const token = `gpu-recovery-${this.nextJobNumber}`;
@@ -161,6 +171,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
   }
 
   async getJob(recovery: CloudTemporalRecoveryIdentity): Promise<CloudTemporalJob> {
+    this.purgeStaleJobs();
     const stored = this.getStoredJob(recovery);
     await settleStartedProcessing(stored);
     this.applyTimeout(stored);
@@ -169,6 +180,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
   }
 
   async getResult(recovery: CloudTemporalRecoveryIdentity): Promise<CloudTemporalJobResult> {
+    this.purgeStaleJobs();
     const stored = this.getStoredJob(recovery);
     await settleStartedProcessing(stored);
     this.applyTimeout(stored);
@@ -180,6 +192,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
   }
 
   async deleteJob(recovery: CloudTemporalRecoveryIdentity): Promise<CloudTemporalJob> {
+    this.purgeStaleJobs();
     const stored = this.getStoredJob(recovery);
     this.cleanupBytes(stored);
     stored.job = {
@@ -192,8 +205,20 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
     return cloneJob(stored.job);
   }
 
+  /**
+   * Number of jobs currently retained in memory (including terminal ones still
+   * inside the purge grace window). Exposed for host observability and tests.
+   */
+  retainedJobCount(): number {
+    this.purgeStaleJobs();
+    return this.jobs.size;
+  }
+
   private async processJob(stored: StoredGpuJob): Promise<void> {
     try {
+      // User may delete (or retention may expire) while we await decode/enhance/
+      // encode. Never resurrect an abandoned job by writing ready/failed over it.
+      if (isAbandonedStatus(stored.job.status)) return;
       const model = this.resolveModel(stored.payload);
       this.updateStatus(stored, "processing");
       const source = stored.sourceBuffer;
@@ -202,6 +227,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
         source,
         stored.payload.source.metadata.format,
       );
+      if (isAbandonedStatus(stored.job.status)) return;
       validateDecodedSequence(frames, stored.payload.source.metadata.frameCount);
 
       const enhancementInput = prepareFramesForEnhancement(frames, model);
@@ -210,6 +236,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
         enhancementStrength: stored.payload.enhancementStrength,
         target: stored.payload.target,
       });
+      if (isAbandonedStatus(stored.job.status)) return;
       validateEnhancedSequence(enhanced, frames.length);
       const outputFrames = restoreAlphaAfterEnhancement(frames, enhanced, model, stored.payload.source.metadata.hasAlpha);
 
@@ -217,6 +244,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
       const dimensions = resolveOutputDimensions(outputFrames);
       const encodeOptions = resolveEncodeOptions(stored.payload.outputFormat, dimensions);
       const buffer = await this.encodeOutput(stored.payload.outputFormat, outputFrames, encodeOptions);
+      if (isAbandonedStatus(stored.job.status)) return;
       stored.result = {
         jobId: stored.job.id,
         buffer,
@@ -238,6 +266,7 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
         result: resultSummary(stored.result),
       };
     } catch (err) {
+      if (isAbandonedStatus(stored.job.status)) return;
       this.cleanupBytes(stored);
       stored.job = {
         ...stored.job,
@@ -350,6 +379,23 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
     };
   }
 
+  /**
+   * Drop job rows whose terminal status is older than the purge grace window.
+   * Expiry only clears source/result bytes; without this, a long-lived host keeps
+   * every historical job object in the Map forever.
+   */
+  private purgeStaleJobs(): void {
+    const currentTime = this.now();
+    for (const [jobId, stored] of this.jobs) {
+      this.applyTimeout(stored);
+      this.applyRetentionExpiry(stored);
+      if (!isPurgeableStatus(stored.job.status)) continue;
+      if (currentTime < stored.job.updatedAt + this.purgeGraceMs) continue;
+      this.cleanupBytes(stored);
+      this.jobs.delete(jobId);
+    }
+  }
+
   private cleanupSource(stored: StoredGpuJob): void {
     stored.sourceBuffer = undefined;
   }
@@ -358,6 +404,16 @@ export class CloudTemporalGpuService implements CloudTemporalJobClient {
     stored.sourceBuffer = undefined;
     stored.result = undefined;
   }
+}
+
+/** Terminal statuses whose rows may be fully dropped after the purge grace window. */
+function isPurgeableStatus(status: CloudTemporalJobStatus): boolean {
+  return status === "expired" || status === "deleted" || status === "failed";
+}
+
+/** Job was cancelled by the user or retention policy mid-flight. */
+function isAbandonedStatus(status: CloudTemporalJobStatus): boolean {
+  return status === "deleted" || status === "expired";
 }
 
 async function settleStartedProcessing(stored: StoredGpuJob): Promise<void> {

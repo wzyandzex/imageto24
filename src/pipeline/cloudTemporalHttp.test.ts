@@ -152,4 +152,59 @@ describe("cloud temporal HTTP adapter (GPU service host)", () => {
     expect(bad.status).toBe(400);
     await expect(bad.text()).resolves.toMatch(/invalid/i);
   });
+
+  it("rejects create bodies that exceed the configured size ceiling with 413", async () => {
+    const form = new FormData();
+    form.set("source", new Blob([new Uint8Array(64)]), "clip.gif");
+    form.set("metadata", JSON.stringify({
+      fileName: "clip.gif",
+      mimeType: "image/gif",
+      format: "gif",
+      byteSize: 64,
+      width: 2,
+      height: 1,
+      frameCount: 3,
+      hasAlpha: true,
+    }));
+    form.set("target", JSON.stringify({ factor: 2 }));
+    form.set("enhancementStrength", "50");
+    form.set("outputFormat", "apng");
+    form.set("modelRouting", JSON.stringify({ kind: "auto", modelId: "temporal-photo-x4-preview" }));
+
+    const response = await handleCloudTemporalHttpRequest(
+      new Request("http://gpu.test/jobs", {
+        method: "POST",
+        body: form,
+        headers: { "content-length": "999999" },
+      }),
+      { service: service(), maxBodyBytes: 128 },
+    );
+    expect(response.status).toBe(413);
+    await expect(response.text()).resolves.toMatch(/maximum body size/i);
+  });
+
+  it("does not pair wildcard CORS with credentials", async () => {
+    const response = await handleCloudTemporalHttpRequest(
+      new Request("http://gpu.test/health", {
+        headers: { origin: "http://localhost:5173" },
+      }),
+      { service: service(), allowOrigin: "*" },
+    );
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    expect(response.headers.get("access-control-allow-credentials")).toBeNull();
+  });
+
+  it("reflects a concrete origin and allows credentials for local browser hosts", async () => {
+    const response = await handleCloudTemporalHttpRequest(
+      new Request("http://gpu.test/health", {
+        headers: { origin: "http://127.0.0.1:5173" },
+      }),
+      {
+        service: service(),
+        allowOrigin: (origin) => origin,
+      },
+    );
+    expect(response.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:5173");
+    expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+  });
 });
