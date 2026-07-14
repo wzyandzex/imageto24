@@ -7,6 +7,10 @@ import {
   type CloudTemporalRecoveryIdentity,
   type CloudTemporalSourceMetadata,
 } from "./cloudTemporalJob";
+import {
+  cloudTemporalClientKey,
+  type CloudTemporalRateLimiter,
+} from "./cloudTemporalRateLimit";
 import type { TargetSpec } from "./types";
 
 /** Default create-body ceiling: product max file size + headroom for form fields. */
@@ -27,6 +31,15 @@ export interface CloudTemporalHttpOptions {
    * Defaults to {@link DEFAULT_CLOUD_TEMPORAL_MAX_BODY_BYTES}.
    */
   readonly maxBodyBytes?: number;
+  /**
+   * Optional create-job rate limiter. When set, POST /jobs is gated per client
+   * key (IP / forwarded-for). Denied requests return 429 + Retry-After.
+   */
+  readonly rateLimiter?: CloudTemporalRateLimiter;
+  /**
+   * Resolve the rate-limit client key. Defaults to {@link cloudTemporalClientKey}.
+   */
+  readonly clientKey?: (request: Request) => string;
 }
 
 /**
@@ -63,6 +76,13 @@ export async function handleCloudTemporalHttpRequest(
     }
 
     if (request.method === "POST" && path === "/jobs") {
+      if (options.rateLimiter) {
+        const key = (options.clientKey ?? cloudTemporalClientKey)(request);
+        const decision = options.rateLimiter.checkCreate(key);
+        if (!decision.allowed) {
+          return rateLimitedResponse(decision.retryAfterSec ?? 1, corsOrigin, decision.limit);
+        }
+      }
       const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_CLOUD_TEMPORAL_MAX_BODY_BYTES;
       assertBodyWithinLimit(request, maxBodyBytes);
       const payload = await parseCreatePayload(request, maxBodyBytes);
@@ -184,10 +204,29 @@ function assertBodyWithinLimit(request: Request, maxBodyBytes: number): void {
 
 function statusForHttpError(message: string): number {
   if (/exceeds the maximum body size/i.test(message)) return 413;
+  if (/rate limit|too many requests/i.test(message)) return 429;
   if (/invalid|not found|not ready|no ready result|missing required|must be/i.test(message)) {
     return 400;
   }
   return 500;
+}
+
+function rateLimitedResponse(
+  retryAfterSec: number,
+  corsOrigin: string | null,
+  limit: number,
+): Response {
+  const headers = new Headers({
+    "content-type": "text/plain; charset=utf-8",
+    "retry-after": String(retryAfterSec),
+    "x-ratelimit-limit": String(limit),
+    "x-ratelimit-remaining": "0",
+  });
+  applyCors(headers, corsOrigin);
+  return new Response(
+    `Cloud temporal create rate limit exceeded. Retry after ${retryAfterSec}s.`,
+    { status: 429, headers },
+  );
 }
 
 function recoveryFromRequest(jobId: string, url: URL): CloudTemporalRecoveryIdentity {

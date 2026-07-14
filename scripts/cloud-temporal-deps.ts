@@ -9,6 +9,7 @@
  */
 import { decodeApngFrames } from "../src/pipeline/browser/apngParser";
 import { decodeGifSequence } from "../src/pipeline/decodeGifSequence";
+import { encodeGifSequence } from "../src/pipeline/encodeGifSequence";
 import { lanczosUpscale } from "../src/pipeline/lanczos";
 import { computeUpscaleFactor } from "../src/pipeline/computeUpscaleFactor";
 import type {
@@ -90,60 +91,11 @@ export function createNodeCloudTemporalEncoder(): CloudTemporalSequenceEncoder {
       return mod.default.encode(imgs, options.width, options.height, 0, delays);
     },
     async encodeGif(frames, options) {
-      const mod = await import("gifenc") as {
-        GIFEncoder: (opts?: { auto?: boolean }) => {
-          writeFrame: (
-            index: Uint8Array,
-            width: number,
-            height: number,
-            opts?: {
-              palette?: number[][];
-              delay?: number;
-              repeat?: number;
-              transparent?: boolean;
-              transparentIndex?: number;
-              dispose?: number;
-            },
-          ) => void;
-          finish: () => void;
-          bytes: () => Uint8Array;
-        };
-        quantize: (
-          rgba: Uint8Array | Uint8ClampedArray,
-          maxColors: number,
-          options?: { format?: string; oneBitAlpha?: boolean },
-        ) => number[][];
-        applyPalette: (
-          rgba: Uint8Array | Uint8ClampedArray,
-          palette: number[][],
-          format: string,
-        ) => Uint8Array;
-      };
-      const { GIFEncoder, quantize, applyPalette } = mod;
-      const gif = GIFEncoder();
-      frames.forEach((frame, i) => {
-        const rgba = frame.imageData.data;
-        const palette = quantize(rgba, 256, { format: "rgba4444", oneBitAlpha: true });
-        const index = applyPalette(rgba, palette, "rgba4444");
-        let transparentIndex = -1;
-        for (let p = 0; p < palette.length; p++) {
-          const entry = palette[p];
-          if (entry.length === 4 && entry[3] === 0) {
-            transparentIndex = p;
-            break;
-          }
-        }
-        gif.writeFrame(index, options.width, options.height, {
-          palette,
-          delay: frame.delay,
-          ...(i === 0 ? { repeat: 0 } : {}),
-          ...(transparentIndex >= 0 ? { transparent: true, transparentIndex } : {}),
-          dispose: frame.disposalType,
-        });
+      // Shared gifenc path (same as the browser animated codec).
+      return encodeGifSequence(frames, {
+        width: options.width,
+        height: options.height,
       });
-      gif.finish();
-      const bytes = gif.bytes();
-      return bytes.slice().buffer;
     },
   };
 }

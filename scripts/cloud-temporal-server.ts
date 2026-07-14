@@ -17,15 +17,24 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { createCloudTemporalGpuService } from "../src/pipeline/cloudTemporalService";
 import { createNodeCloudTemporalDeps } from "./cloud-temporal-deps";
 import { handleCloudTemporalHttpRequest } from "../src/pipeline/cloudTemporalHttp";
+import { createCloudTemporalRateLimiter } from "../src/pipeline/cloudTemporalRateLimit";
 
 const port = Number(process.env.CLOUD_TEMPORAL_PORT ?? 8787);
 const host = process.env.CLOUD_TEMPORAL_HOST ?? "127.0.0.1";
 const publicBase = process.env.CLOUD_TEMPORAL_PUBLIC_URL ?? `http://${host}:${port}`;
+// Create-job rate limit (fixed window). Override via env for load tests.
+const rateMaxCreates = Number(process.env.CLOUD_TEMPORAL_RATE_MAX ?? 30);
+const rateWindowMs = Number(process.env.CLOUD_TEMPORAL_RATE_WINDOW_MS ?? 60_000);
 
 const service = createCloudTemporalGpuService({
   deps: createNodeCloudTemporalDeps(),
   recoveryUrl: ({ jobId, token }) =>
     `${publicBase}/jobs/${encodeURIComponent(jobId)}?token=${encodeURIComponent(token)}`,
+});
+
+const rateLimiter = createCloudTemporalRateLimiter({
+  maxCreates: Number.isFinite(rateMaxCreates) ? rateMaxCreates : 30,
+  windowMs: Number.isFinite(rateWindowMs) ? rateWindowMs : 60_000,
 });
 
 // Local/dev CORS: reflect the browser Origin when present so credentialed
@@ -39,6 +48,7 @@ const server = createServer(async (req, res) => {
     const response = await handleCloudTemporalHttpRequest(request, {
       service,
       allowOrigin,
+      rateLimiter,
     });
     await writeFetchResponse(res, response);
   } catch (err) {

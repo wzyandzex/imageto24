@@ -207,4 +207,41 @@ describe("cloud temporal HTTP adapter (GPU service host)", () => {
     expect(response.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:5173");
     expect(response.headers.get("access-control-allow-credentials")).toBe("true");
   });
+
+  it("returns 429 when the create-job rate limiter is exhausted", async () => {
+    const { createCloudTemporalRateLimiter } = await import("./cloudTemporalRateLimit");
+    const limiter = createCloudTemporalRateLimiter({ maxCreates: 1, windowMs: 60_000, now: () => 1_000 });
+    const form = () => {
+      const f = new FormData();
+      f.set("source", new Blob([new Uint8Array([1, 2, 3])]), "clip.gif");
+      f.set("metadata", JSON.stringify({
+        fileName: "clip.gif",
+        mimeType: "image/gif",
+        format: "gif",
+        byteSize: 3,
+        width: 2,
+        height: 1,
+        frameCount: 3,
+        hasAlpha: true,
+      }));
+      f.set("target", JSON.stringify({ factor: 2 }));
+      f.set("enhancementStrength", "50");
+      f.set("outputFormat", "apng");
+      f.set("modelRouting", JSON.stringify({ kind: "auto", modelId: "temporal-photo-x4-preview" }));
+      return f;
+    };
+    const opts = { service: service(), rateLimiter: limiter };
+    const first = await handleCloudTemporalHttpRequest(
+      new Request("http://gpu.test/jobs", { method: "POST", body: form() }),
+      opts,
+    );
+    expect(first.status).toBe(200);
+    const second = await handleCloudTemporalHttpRequest(
+      new Request("http://gpu.test/jobs", { method: "POST", body: form() }),
+      opts,
+    );
+    expect(second.status).toBe(429);
+    expect(second.headers.get("retry-after")).toBeTruthy();
+    await expect(second.text()).resolves.toMatch(/rate limit/i);
+  });
 });

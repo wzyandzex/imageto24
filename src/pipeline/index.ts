@@ -205,5 +205,15 @@ export {
   type CloudTemporalHttpOptions,
 } from "./cloudTemporalHttp";
 
-// Shared animated-GIF compositor (browser codec + Node cloud host).
+// Shared animated-GIF compositor + encoder (browser codec + Node cloud host).
 export { decodeGifSequence } from "./decodeGifSequence";
+export { encodeGifSequence, type EncodeGifSequenceOptions, type GifEncodeFrame } from "./encodeGifSequence";
+
+// Create-job rate limiting for the HTTP host (optional inject).
+export {
+  cloudTemporalClientKey,
+  createCloudTemporalRateLimiter,
+  type CloudTemporalRateLimitDecision,
+  type CloudTemporalRateLimitOptions,
+  type CloudTemporalRateLimiter,
+} from "./cloudTemporalRateLimit";
