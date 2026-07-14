@@ -71,7 +71,8 @@ export const MODEL_CATALOG: readonly AiModelMetadata[] = [
     stability: "experimental",
     availability: ["cloud"],
     availabilityState: "available",
-    description: "Animation/video-friendly cloud model for photo-like motion.",
+    description:
+      "Cloud temporal path for photo-like motion. The free local host uses Lanczos + neighbour consistency (not neural weights); a GPU host can swap in real temporal models later.",
   },
   {
     id: "temporal-illustration-x4-preview",
@@ -84,7 +85,8 @@ export const MODEL_CATALOG: readonly AiModelMetadata[] = [
     stability: "experimental",
     availability: ["cloud"],
     availabilityState: "available",
-    description: "Animation/video-friendly cloud model for illustrated motion and line art.",
+    description:
+      "Cloud temporal path for illustrated motion and line art. Free local host: Lanczos + neighbour consistency; neural temporal weights remain optional.",
   },
   {
     id: "temporal-alpha-lab-x4",

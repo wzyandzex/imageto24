@@ -4,10 +4,10 @@
  * Wires {@link createCloudTemporalGpuService} + Node codec deps behind the
  * browser HTTP contract used by {@link HttpCloudTemporalJobClient}.
  *
- * Real temporal model weights are not required for this MVP host: the enhancer
- * runs faithful Lanczos over every frame so the upload → process → APNG path is
- * end-to-end real without a GPU. Swap the enhancer injection later without
- * changing the HTTP surface.
+ * Default enhancer is free **temporal-consistency** (Lanczos all-frames +
+ * neighbour blend). No GPU, no paid API, no weight download. Set
+ * CLOUD_TEMPORAL_ENHANCER=lanczos for pure per-frame Lanczos. Neural temporal
+ * weights can replace the enhancer injection later without changing HTTP.
  *
  * Run:
  *   npm run cloud:temporal
@@ -15,7 +15,10 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createCloudTemporalGpuService } from "../src/pipeline/cloudTemporalService";
-import { createNodeCloudTemporalDeps } from "./cloud-temporal-deps";
+import {
+  createNodeCloudTemporalDeps,
+  resolveEnhancerKindFromEnv,
+} from "./cloud-temporal-deps";
 import { handleCloudTemporalHttpRequest } from "../src/pipeline/cloudTemporalHttp";
 import { createCloudTemporalRateLimiter } from "../src/pipeline/cloudTemporalRateLimit";
 
@@ -25,9 +28,10 @@ const publicBase = process.env.CLOUD_TEMPORAL_PUBLIC_URL ?? `http://${host}:${po
 // Create-job rate limit (fixed window). Override via env for load tests.
 const rateMaxCreates = Number(process.env.CLOUD_TEMPORAL_RATE_MAX ?? 30);
 const rateWindowMs = Number(process.env.CLOUD_TEMPORAL_RATE_WINDOW_MS ?? 60_000);
+const enhancerKind = resolveEnhancerKindFromEnv();
 
 const service = createCloudTemporalGpuService({
-  deps: createNodeCloudTemporalDeps(),
+  deps: createNodeCloudTemporalDeps(enhancerKind),
   recoveryUrl: ({ jobId, token }) =>
     `${publicBase}/jobs/${encodeURIComponent(jobId)}?token=${encodeURIComponent(token)}`,
 });
@@ -61,6 +65,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, host, () => {
   console.log(`[cloud-temporal] listening on ${publicBase}`);
+  console.log(`[cloud-temporal] enhancer=${enhancerKind} (free local; no GPU required)`);
   console.log(`[cloud-temporal] set VITE_CLOUD_TEMPORAL_ENDPOINT=${publicBase}`);
 });
 

@@ -209,6 +209,17 @@ export {
 export { decodeGifSequence } from "./decodeGifSequence";
 export { encodeGifSequence, type EncodeGifSequenceOptions, type GifEncodeFrame } from "./encodeGifSequence";
 
+// Free local temporal-consistency pass (Lanczos + neighbour blend; not neural).
+export {
+  enhanceWithTemporalConsistency,
+  blendWithNeighbours,
+  temporalNeighbourWeight,
+  TEMPORAL_CONSISTENCY_MAX_NEIGHBOUR_WEIGHT,
+  type TemporalConsistencyFrame,
+  type TemporalConsistencyOptions,
+} from "./temporalConsistency";
+
+
 // Create-job rate limiting for the HTTP host (optional inject).
 export {
   cloudTemporalClientKey,
