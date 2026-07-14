@@ -124,10 +124,13 @@ function App() {
   });
   const cloudConsentMissing = useCloudTemporal && !cloudUploadConsent;
   // For an animated APNG the worker needs the APNG decoder format; every other
-  // input uses the source's resolved format.
+  // input (incl. still PNG) uses the source's resolved format. `source` is
+  // guarded by `if (!source) return` in runUpscale, so the fallback is nominal.
   const workerFormat: AnimatedImageFormat =
     isAnimatedInput && source?.animation.apng ? "apng" : source?.format ?? "png";
-  // APNG input is the ADR-0007 v4 exception: always output APNG.
+  // APNG input is the ADR-0007 v4 exception: even on a non-WebCodecs device the
+  // output is APNG (true-colour), never GIF. Only meaningful for animated input;
+  // for stills the effective output is the user's selection.
   const animatedOutputIsApng = isAnimatedInput && (!!source?.animation.apng || !!capability?.webCodecs);
   const animatedOutputExt = animatedOutputIsApng ? "apng" : "gif";
   const animatedOutputMime = animatedOutputIsApng ? "image/apng" : "image/gif";
@@ -244,7 +247,9 @@ function App() {
         {
           source: buffer,
           format: workerFormat,
-          // Routing flag (issue #16): multi-frame GIF → processAnimated.
+          // Routing flag (issue #16): a multi-frame GIF dispatches to
+          // `processAnimated` in the worker; everything else stays on the still
+          // path. The detection ran on upload; here we just forward the decision.
           animated: source.animation.isAnimated,
           options: {
             // effectiveMode is the user's selection downgraded when AI is unavailable.
@@ -410,7 +415,21 @@ function App() {
                     ? "Original: dimensions read after conversion (HEIC isn't browser-decodable)."
                     : `Original: ${source.width} × ${source.height}px`}
                 </p>
-                {/* Animated-image notices (issue #16/#18/#26/#29). Honest messaging. */}
+                {/* Animated-image notices (issue #16 detection; #18 GIF path,
+                    #26 WebP path; #29 device-determined output). Honest messaging,
+                      never a silent surprise:
+                      - multi-frame GIF / animated WebP → frame count + "every
+                        frame upscaled and re-encoded as a playable animation"
+                        (processAnimated). ADR-0006 honest messaging: faithful =
+                        every frame; AI = first frame only, rest faithful. The
+                        output container is device-determined (ADR-0007, issue
+                        #29): true-colour APNG on a WebCodecs-capable browser,
+                        256-colour GIF otherwise — stated so the user's PNG/WebP/
+                        JPEG choice isn't silently ignored.
+                      - APNG input → multi-frame APNG now follows the animated
+                        path and always outputs APNG (ADR-0007 v4 exception);
+                        single-frame APNG is processed as a still.
+                    A single-frame GIF/WebP or a plain still shows nothing here. */}
                 {source.animation.isAnimated && (
                   <div className="flex flex-col gap-1" data-testid="animated-notice">
                     <p className="text-muted-foreground">
